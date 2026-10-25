@@ -503,9 +503,13 @@ schedules:
 
 An object's `annotation.yaml` can carry `lights:` entries with `name` (default
 `light`), `fixture` (default `bulb`), `pose`, `lumens`, `cct_K`,
-`cone_deg` and `glow`. `arena_assets` writes them when it builds an object whose
+`cone_deg`, `glow` and `link`. `arena_assets` writes them when it builds an object whose
 source model contains lights (hand-written entries win, and the built models
-carry no light themselves). `glow` names the material that glows with the
+carry no light themselves). A light of an articulated object carries `link:`,
+the link of the source node it sits under (the root link otherwise), and
+follows that link as the joints move: its position rides on the link and its
+beam turns by the yaw of the link's turn only, so the beam of a tilting link
+keeps its yaw part. `glow` names the material that glows with the
 light, a lamp shade for instance: Isaac, Gazebo and MuJoCo make it emit the
 light's color scaled by its dim, and it is dark while the light is off. Every
 placement of the object, in a level's `objects:`, a scenario's `objects:` or

@@ -71,7 +71,7 @@ def on_dummy_sim():
         class RecordingSimulator(DummySimulator):
             def __init__(self, **kwargs: typing.Any) -> None:
                 super().__init__(**kwargs)
-                self.calls: list[tuple[str, list]] = []
+                self.calls: list[tuple] = []
 
             async def obstacle_spawn(self, obstacles):
                 self.calls.append(("spawn", list(obstacles)))
@@ -84,6 +84,10 @@ def on_dummy_sim():
             async def obstacle_delete(self, obstacles):
                 self.calls.append(("delete", list(obstacles)))
                 return await super().obstacle_delete(obstacles)
+
+            async def _move_light(self, light, position, yaw):
+                self.calls.append(("light", light.name, position, yaw))
+                return await super()._move_light(light, position, yaw)
 
         async def main() -> None:
             suffix = uuid.uuid4().hex[:8]
@@ -252,6 +256,61 @@ def test_joints_reach_a_written_target_state_at_their_speed(assets, on_dummy_sim
         snapshot = _snapshot(sim)
         assert snapshot.discrete == {"state": "open", "target": "open"}
         assert snapshot.predicates == {"closed": False, "open": True, "moving": False, "blocked": False}
+
+    on_dummy_sim(body)
+
+
+def _door_light(link: str, x: float, y: float, yaw: float):
+    from arena_simulation_setup.shared import Light
+    from task_generator.shared import Orientation, Pose, Position
+
+    origin = Pose(position=Position(x, y, 0.0), orientation=Orientation.from_yaw(yaw))
+    return Light(name=f"cabinet_{link or 'free'}_light", fixture="downlight", lumens=100.0, owner="cabinet", link=link, pose=origin * Pose(position=Position(0.0, -0.31, 0.4), orientation=Orientation.from_euler((0.3, 0.0, 0.0))))
+
+
+def _light_moves(sim) -> list[tuple]:
+    return [call for call in sim.calls if call[0] == "light"]
+
+
+def test_a_light_on_the_door_link_swings_with_the_door(assets, on_dummy_sim):
+    from arena_runtime.sim import _mechanism_shim as shim
+
+    x, y, yaw = 1.0, 2.0, 0.7
+
+    async def body(sim):
+        await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"], x=x, y=y, yaw=yaw)])
+        light = _door_light("door", x, y, yaw)
+        assert await sim.spawn_lights([light])
+        sim.calls.clear()
+        assert sim.set_semantic_value("env_0/cabinet", "target", "open")
+        runtime = sim._articulated["cabinet"]
+        for _ in range(8):
+            await shim._tick(sim, DT)
+        assert runtime.current["door"] == pytest.approx(1.5)
+        angle = 1.5
+        px, py = 0.0 - 0.5, -0.31 + 0.3
+        qx, qy = 0.5 + math.cos(angle) * px - math.sin(angle) * py, -0.3 + math.sin(angle) * px + math.cos(angle) * py
+        expected = (x + math.cos(yaw) * qx - math.sin(yaw) * qy, y + math.sin(yaw) * qx + math.cos(yaw) * qy, 0.4)
+        _verb, name, position, turn = _light_moves(sim)[-1]
+        assert name == light.name
+        assert (position.x, position.y, position.z) == pytest.approx(expected)
+        assert _yaw_gap(turn, angle) == pytest.approx(0.0, abs=1e-9)
+
+    on_dummy_sim(body)
+
+
+def test_lights_off_the_moving_links_stay_put_while_the_door_swings(assets, on_dummy_sim):
+    from arena_runtime.sim import _mechanism_shim as shim
+
+    async def body(sim):
+        await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"], x=1.0, y=2.0, yaw=0.7)])
+        assert await sim.spawn_lights([_door_light("", 1.0, 2.0, 0.7), _door_light("body", 1.0, 2.0, 0.7)])
+        sim.calls.clear()
+        assert sim.set_semantic_value("env_0/cabinet", "target", "open")
+        for _ in range(8):
+            await shim._tick(sim, DT)
+        assert sim._articulated["cabinet"].current["door"] == pytest.approx(1.5)
+        assert _light_moves(sim) == []
 
     on_dummy_sim(body)
 

@@ -487,7 +487,7 @@ class MechanismITF:
         return
 
     async def _move_light(self, light: Light, position: Position, yaw: float) -> None:
-        """Place a frame-anchored light at a map position, its direction turned by yaw. No-op by default."""
+        """Place a frame-anchored or link-riding light at a map position, its direction turned by yaw. No-op by default."""
         return
 
     def frame_pose(self, frame: str) -> tuple[Position, float] | None:

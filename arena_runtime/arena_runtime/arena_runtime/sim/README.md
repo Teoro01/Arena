@@ -75,14 +75,14 @@ Defined in [`_interface.py`](_interface.py):
 
 Robot tracking is not a primitive to override: call `_register_agent_robot(robot, model_params)` on spawn and `_forget_agent_robot(sim_path)` on remove, and the base class serves `robot_discs()` / `robot_pose()` from TF.
 
-Lights follow the same pattern. `spawn_lights(lights)` and `remove_lights()` keep the light table, and every tick pushes each `light` semantic entity whose output changed, after moving frame-anchored lights that moved more than 2 cm or 0.02 rad. A simulator renders lights by overriding four no-op hooks:
+Lights follow the same pattern. `spawn_lights(lights)` and `remove_lights()` keep the light table, and every tick pushes each `light` semantic entity whose output changed, after moving frame-anchored and link-riding lights that moved more than 2 cm or 0.02 rad. A simulator renders lights by overriding four no-op hooks:
 
 | Light hook | Signature | Purpose |
 | --- | --- | --- |
 | `_spawn_lights` | `(Sequence[Light]) -> bool` | create the light entities, dome and sun replacing the default lighting |
 | `_remove_lights` | `(Sequence[Light]) -> bool` | delete them and restore the default lighting |
 | `_apply_light` | `(light, level, alive) -> None` | render at `level` in 0..1 with the per-fixture alive mask |
-| `_move_light` | `(light, position, yaw) -> None` | place a frame-anchored light, its direction turned by `yaw` |
+| `_move_light` | `(light, position, yaw) -> None` | place a frame-anchored or link-riding light, its direction turned by `yaw` |
 
 A light with `glow` also makes that material of its `owner` entity emit the light's color at `level`: Gazebo recolors the model's `glow_<material>` visual over `/world/default/material_color`, Isaac sets the material's emissive color on the session layer, MuJoCo sets the emission and color of the placement's own glow materials before each render.
 
@@ -166,7 +166,11 @@ object for that tick and marks it `blocked`, it resumes once clear. The
 spawn and detached on delete, its `reset()` returns the joints to their initial
 values and the next tick places the links, see
 [AUTHORING.md](../../../../arena_simulation_setup/AUTHORING.md#articulated-objects)
-for its fields.
+for its fields. A light whose `owner` is an articulated obstacle and whose
+`link` names one of its non-root links rides on that link: `_apply_lights`
+carries its spawn pose through the link motion at the current joint values
+(`link_light_pose`) and moves it through `_move_light` with the yaw of that
+motion, on the same tick that steps the joints.
 
 ### `SimLifecycle`
 

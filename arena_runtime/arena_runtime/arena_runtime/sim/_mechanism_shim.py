@@ -14,7 +14,7 @@ from arena_simulation_setup.shared.world import CABIN_DOOR_INSET as DOOR_INSET
 from arena_simulation_setup.shared.world import CABIN_DOOR_THRESHOLD, CABIN_DOOR_WIDTH, ActivationDistance
 from task_generator.shared import Door, Elevator, Orientation, Pose, Position
 
-from ._articulation import step_articulated
+from ._articulation import link_light_pose, step_articulated
 from ._interface import _BOX_FLOOR_CLEARANCE
 
 if typing.TYPE_CHECKING:
@@ -903,8 +903,17 @@ def _light_moved(last: tuple[Position, float] | None, position: Position, yaw: f
 
 
 async def _apply_lights(mech: MechanismITF) -> None:
-    """Move frame-anchored lights that moved, then push every light whose output changed since its last push."""
+    """Move frame-anchored and link-riding lights that moved, then push every light whose output changed since its last push."""
     for entity, light in mech._lights.items():
+        if light.link and light.owner in mech._articulated:
+            target = link_light_pose(mech._articulated[light.owner], light)
+            if target is None:
+                continue
+            position, yaw = target
+            if _light_moved(mech._light_poses.get(entity), position, yaw):
+                await mech._move_light(light, position, yaw)
+                mech._light_poses[entity] = (position, yaw)
+            continue
         if not light.frame:
             continue
         pose = mech.frame_pose(light.frame)

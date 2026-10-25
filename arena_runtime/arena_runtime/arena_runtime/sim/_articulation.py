@@ -13,6 +13,7 @@ from arena_simulation_setup.utils.articulation import Articulation, Joint, Joint
 from task_generator.shared import Obstacle, Pose, Position
 
 if typing.TYPE_CHECKING:
+    from arena_simulation_setup.shared import Light
     from arena_simulation_setup.utils.geometry import Scale
 
     from ._interface import MechanismITF
@@ -142,6 +143,17 @@ class ArticulatedObject:
         sx, sy, sz = (scale.x, scale.y, scale.z) if scale is not None else (1.0, 1.0, 1.0)
         corners = (pose * Position(x * sx, y * sy, z * sz) for x in box[0] for y in box[1] for z in box[2])
         return hull([(corner.x, corner.y) for corner in corners])
+
+
+def link_light_pose(runtime: ArticulatedObject, light: Light) -> tuple[Position, float] | None:
+    """Map position and yaw turn of a light riding on a link of the object at its current joint values, None off the moving links."""
+    articulation = runtime.articulation
+    if light.pose is None or not light.link or light.link == articulation.root or light.link not in articulation.links:
+        return None
+    origin = runtime.obstacle.pose
+    motion = scaled(articulation.link_poses(runtime.current)[light.link], runtime.obstacle.scale)
+    placed = origin * motion * (origin.inverse() * light.pose)
+    return (placed.position, (placed.orientation * light.pose.orientation.inverse()).to_yaw())
 
 
 async def resolve_articulated(obstacle: Obstacle, entity: str) -> ArticulatedObject | None:
