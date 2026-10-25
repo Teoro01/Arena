@@ -90,7 +90,7 @@ MujocoSimulator is per-env on task_generator_node and adapts env-namespace state
 """
 
 _MUJOCO_PHYSICS_DT = 0.002
-_MESH_MODEL_TYPES = (ModelType.OBJ, ModelType.SDF)
+_MESH_MODEL_TYPES = (ModelType.SDF, ModelType.OBJ)
 _SPAWN_ASSETS_TIMEOUT_S = 300.0
 _RESEND_AFTER_S = 10.0
 
@@ -208,6 +208,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
         self._peds_publisher = self.node.create_publisher(Pedestrians, "/mujoco/arena_peds", 10)
 
         self._robot_prims: dict[str, str] = {}
+        self._box_centers: dict[str, tuple[float, float, float]] = {}
 
     def _robot_loader_args(self, robot: Robot) -> dict[str, object]:
         robot_config = arena_robots.Robot.RobotIdentifier(robot.model.name).resolve_sync()
@@ -411,6 +412,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
         req = SpawnPrims.Request(env_id=self._env_id)
         indices: list[int] = []
         skipped: list[str] = []
+        centers: dict[int, tuple[float, float, float]] = {}
         for i, (obstacle, (meshes, box)) in enumerate(zip(obstacles, plans, strict=True)):
             scale = (1.0, 1.0, 1.0) if obstacle.scale is None else (obstacle.scale.x, obstacle.scale.y, obstacle.scale.z)
             pose = obstacle.pose
@@ -419,7 +421,8 @@ class MujocoSimulator(BaseSim, NodeInterface):
                     skipped.append(obstacle.name)
                     continue
                 size, center = box
-                pose = offset_pose(pose, tuple(c * f for c, f in zip(center, scale, strict=True)))
+                centers[i] = (center[0] * scale[0], center[1] * scale[1], center[2] * scale[2])
+                pose = offset_pose(pose, centers[i])
                 scale = tuple(d * f for d, f in zip(size, scale, strict=True))
             req.prims.append(  # pyright: ignore[reportAttributeAccessIssue]
                 Prim(
@@ -438,10 +441,20 @@ class MujocoSimulator(BaseSim, NodeInterface):
         if req.prims and (response := await self._clients.SpawnPrims.call_timeout(req)) is not None:
             for i, ok in zip(indices, response.ret, strict=True):
                 results[i] = bool(ok)
+                name = self._NS_PRIM(obstacles[i].name)
+                if ok and i in centers:
+                    self._box_centers[name] = centers[i]
+                else:
+                    self._box_centers.pop(name, None)
         return tuple(results)
 
+    def _placement(self, obstacle: Obstacle) -> tuple[str, Pose]:
+        name = self._NS_PRIM(obstacle.name)
+        center = self._box_centers.get(name)
+        return name, obstacle.pose if center is None else offset_pose(obstacle.pose, center)
+
     async def obstacle_move(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
-        return await self._move_entities([(self._NS_PRIM(o.name), o.pose) for o in obstacles])
+        return await self._move_entities([self._placement(o) for o in obstacles])
 
     async def pedestrian_move(self, pedestrians: Sequence[DynamicObstacle]) -> Sequence[bool]:
         req = MovePedestrians.Request(
@@ -469,7 +482,10 @@ class MujocoSimulator(BaseSim, NodeInterface):
         return await asyncio.gather(*map(move_robot, robots))
 
     async def obstacle_delete(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
-        return await self._delete_entities([self._NS_PRIM(o.name) for o in obstacles])
+        names = [self._NS_PRIM(o.name) for o in obstacles]
+        for name in names:
+            self._box_centers.pop(name, None)
+        return await self._delete_entities(names)
 
     async def pedestrian_delete(self, pedestrians: Sequence[DynamicObstacle]) -> Sequence[bool]:
         res = await self._clients.DeletePedestrians.call_timeout(DeletePedestrians.Request(names=[p.sim_path for p in pedestrians]))

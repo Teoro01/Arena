@@ -176,27 +176,59 @@ def _humansim_object(value: Mapping[str, object] | None) -> dict:
     return value
 
 
+Joints = str | dict[str, float | str] | None
+
+
+def _joints(value: object) -> Joints:
+    if value is None or isinstance(value, str):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError(f'joints must be a state name or a mapping of joint names to values or state names, got {value!r}')
+    joints: dict[str, float | str] = {}
+    for joint, position in value.items():
+        if isinstance(position, str):
+            joints[str(joint)] = position
+        elif isinstance(position, (int, float)) and not isinstance(position, bool):
+            joints[str(joint)] = float(position)
+        else:
+            raise ValueError(f'joint {joint!r} takes a number or a state name, got {position!r}')
+    return joints
+
+
 @attrs.define
 class Obstacle(Entity):
     scale: Scale | None = None
     light: ObjectLightSettings | None = None
     humansim: dict = attrs.field(factory=dict, converter=_humansim_object)
+    joints: Joints = attrs.field(default=None, converter=_joints)
 
-    async def footprint(self) -> shapely.Polygon | None:
-        """Map-frame 2D footprint from the asset's annotated bounds, None when unannotated."""
-        import shapely
-        import shapely.affinity
-
+    async def _corners(self) -> list[Position] | None:
         try:
             view = await self.model.resolve()
         except FileNotFoundError:
             return None
-        bounds = view.bounds
-        if bounds is None:
+        if view.extent is None:
             return None
-        poly = shapely.Polygon(bounds)
-        poly = shapely.affinity.rotate(poly, self.pose.orientation.to_yaw(), origin=(0, 0), use_radians=True)
-        return shapely.affinity.translate(poly, xoff=self.pose.position.x, yoff=self.pose.position.y)
+        return [self.pose * Position(x, y, z) for x in view.extent[0] for y in view.extent[1] for z in view.extent[2]]
+
+    async def footprint(self) -> shapely.Polygon | None:
+        """Map-frame 2D footprint of the asset's annotated box through the full pose, None when unannotated."""
+        import shapely
+
+        corners = await self._corners()
+        if corners is None:
+            return None
+        hull = shapely.MultiPoint([(corner.x, corner.y) for corner in corners]).convex_hull
+        if isinstance(hull, shapely.Polygon):
+            return hull
+        return shapely.Polygon([(corners[i].x, corners[i].y) for i in (0, 2, 6, 4)])
+
+    async def span(self) -> tuple[float, float] | None:
+        """Map-frame z range of the asset's annotated box through the full pose, None when unannotated."""
+        corners = await self._corners()
+        if corners is None:
+            return None
+        return min(corner.z for corner in corners), max(corner.z for corner in corners)
 
     async def affordance_slots(self) -> list[AffordanceSlot]:
         """Placed affordance slots of the asset in the obstacle-local frame, empty when unannotated."""
@@ -208,6 +240,7 @@ class Obstacle(Entity):
 
 
 converter.register_structure_hook_func(lambda t: t == dict | str | None, lambda v, _t: v)
+converter.register_structure_hook_func(lambda t: t == Joints, lambda v, _t: _joints(v))
 
 
 def _waypoints_converter(value: object) -> list[Waypoint]:

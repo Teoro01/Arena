@@ -33,7 +33,7 @@ from task_generator.shared import DynamicObstacle, Floor, ModelType, Obstacle, P
 from task_generator.simulators.human import PED_RADIUS
 
 from arena_runtime.sim import BaseSim, SimKwargs, SimLifecycle, SimUnavailable
-from arena_runtime.sim._interface import resolve_obstacle_box, robot_footprint_radius
+from arena_runtime.sim._interface import robot_footprint_radius
 
 from .planar import drive_model
 
@@ -343,10 +343,9 @@ class FlatsimSimulator(BaseSim):
         if poly is None:
             self._logger.warning(f'obstacle {obstacle.name!r} has no annotated footprint, not spawned')
             return None
-        box = await resolve_obstacle_box(obstacle)
-        height = box[0][2] if box is not None else _OBSTACLE_HEIGHT
         z = obstacle.pose.position.z
-        return _outline(key, [_ring(poly.exterior), *map(_ring, poly.interiors)], (z, z + height))
+        span = await obstacle.span() or (z, z + _OBSTACLE_HEIGHT)
+        return _outline(key, [_ring(poly.exterior), *map(_ring, poly.interiors)], span)
 
     async def _send_outlines(self, outlines: Sequence[Outline]) -> bool:
         if not outlines:

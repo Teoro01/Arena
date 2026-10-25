@@ -803,7 +803,7 @@ class TaskGenerator(ArenaMixinNode, SafeCallbackNode, rclpy.lifecycle.LifecycleN
         prefix = f"{self._realizer.prefix()}/"
         for change in changes:
             kind = _SEMANTIC_KINDS.get(change.kind)
-            if change.field_kind == "state" and (change.field in kind.CONTINUOUS if kind is not None else self._is_number(change.current)):
+            if change.field_kind == "state" and (kind.is_continuous(change.field) if kind is not None else self._is_number(change.current)):
                 continue
             entity = authored.get(change.entity) or human.authored_name(change.entity)
             value = change.current.removeprefix(prefix)

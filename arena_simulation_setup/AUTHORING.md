@@ -254,13 +254,15 @@ acoustics pipeline. Full field reference:
 
 ### Semantic annotations
 
-Door and elevator state is intrinsic: every spawned door/elevator publishes
-its full vocabulary with no annotation needed:
+Door, elevator and articulated object state is intrinsic: every spawned
+door, elevator and articulated object publishes its full vocabulary with no
+annotation needed:
 
 | kind | discrete | continuous | predicates | members |
 | --- | --- | --- | --- | --- |
 | door | `state` | `progress` | `open`, `in_transit`, `triggered`, `blocked_close` (a close is refused because an agent is in the slab path) | agents within the activation radius |
 | elevator | `cabin_door`, `target` (writable, see above) | `arriving_eta`, `occupants` (riders committed to a ride), `cabin_door_progress`, `live_occupants` (agents inside now), `capacity` (-1 = unlimited) | `departing`, `in_transit`, `dispatched`, `just_arrived`, `full` | agents inside the cabin now |
+| articulated | `state`, `target` (writable, see [Articulated objects](#articulated-objects)) | one per movable joint, its current value (writable) | one per state name, `moving`, `blocked` | none |
 
 Agents are named as the runtime tracks them: robots by sim path, pedestrians
 by their ped name. `semantics:` on a `doors:`/`elevators:` entry is only for
@@ -288,6 +290,41 @@ elevators:
 ```
 
 Full field reference: [worlds/README.md](worlds/README.md).
+
+### Articulated objects
+
+An object whose annotation carries `articulation:` (links, joints, named
+states, built by arena_assets) spawns as one static obstacle per link,
+posed by its joint values, and gets an `articulated` semantic entity under
+its env-prefixed name. Its `joints:` key sets the joint values every episode
+starts from (see the objects keys in [worlds/README.md](worlds/README.md)).
+
+| field | role | meaning |
+| --- | --- | --- |
+| `state` | discrete | the first state all of whose joint values the joints hold, empty between states |
+| `target` | discrete, writable | the state the targets match, empty otherwise. Writing a state name sets the targets of the joints that state names, the others keep theirs |
+| `<joint>` | continuous, writable | the joint's current value (radians or meters). Writing sets its target, clamped to its limits |
+| `<state>` | predicate | the joints hold that state's values |
+| `moving` | predicate | a joint is away from its target |
+| `blocked` | predicate | the last step was held because a moving link would have entered a robot or pedestrian disc |
+
+Joints move toward their targets at their `velocity` (1 rad/s or 0.25 m/s
+when unset). An unknown state name or a non-number joint value is refused as
+a malformed value, and an episode reset returns every joint to its initial
+value. A scenario timeline opens a fridge at `t=5s`, and a phase or episode
+condition judges it with the entity atom:
+
+```yaml
+timeline:
+- at: 5.0
+  set:
+  - {entity: fridge, field: target, value: open}
+robots:
+- start: [1.0, 1.0, 0.0]
+  phases:
+  - {goto: kitchen}
+  - {until: "fridge.state == open"}
+```
 
 ### KG
 

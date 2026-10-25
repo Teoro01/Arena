@@ -237,3 +237,67 @@ def test_obstacle_affordance_slots_are_empty_for_an_unresolvable_model(bench_ass
     import asyncio
 
     assert asyncio.run(Obstacle.parse({"name": "ghost", "model": "Hospital/TestMissingSeat", "pose": [0.0, 0.0, 0.0]}).affordance_slots()) == []
+
+
+def test_obstacle_joints_take_a_state_name_or_joint_values_and_serialize_back():
+    base = {"name": "cabinet", "model": "cabinet", "pose": [0.0, 0.0, 0.0]}
+    by_state = Obstacle.parse({**base, "joints": "open"})
+    by_value = Obstacle.parse({**base, "joints": {"door": 1, "drawer": "open"}})
+    assert by_state.joints == "open"
+    assert by_value.joints == {"door": 1.0, "drawer": "open"}
+    assert by_value.serialize()["joints"] == {"door": 1.0, "drawer": "open"}
+    assert Obstacle.parse(by_value.serialize()).joints == by_value.joints
+    assert Obstacle.parse(base).joints is None
+    assert "joints" not in Obstacle.parse(base).serialize()
+
+
+@pytest.mark.parametrize(("joints", "message"), [([1.0], "joints must be a state name or a mapping"), ({"door": True}, "joint 'door' takes a number or a state name")])
+def test_obstacle_joints_refuse_other_values(joints, message):
+    with pytest.raises(ValueError, match=message):
+        Obstacle.parse({"name": "cabinet", "model": "cabinet", "pose": [0.0, 0.0, 0.0], "joints": joints})
+
+
+def test_obstacle_still_refuses_unknown_keys_next_to_joints():
+    with pytest.raises(ValueError, match=r"unknown keys \['joint'\]"):
+        Obstacle.parse({"name": "cabinet", "model": "cabinet", "pose": [0.0, 0.0, 0.0], "joints": "open", "joint": "open"})
+
+
+@pytest.fixture
+def cabinet_assets(tmp_path):
+    from arena_simulation_setup.tree import DynamicPaths
+
+    cabinet = tmp_path / "Kitchen" / "Object" / "TestSweptCabinet"
+    cabinet.mkdir(parents=True)
+    articulation = "{links: {body: [], door: []}, joints: [{name: door, type: revolute, parent: body, child: door, origin: [0.5, -0.3, 0.0], axis: [0, 0, 1], limit: [0.0, 1.57]}], swept: [[-0.5, 0.5], [-1.3, 0.3], [0.0, 1.0]]}"
+    (cabinet / "annotation.yaml").write_text(f"bounding_box: [[-0.5, 0.5], [-0.3, 0.3], [0.0, 1.0]]\narticulation: {articulation}\n")
+    previous = DynamicPaths.ARENA.path
+    DynamicPaths.ARENA.path = tmp_path
+    yield tmp_path
+    DynamicPaths.ARENA.path = previous
+
+
+def test_obstacle_footprint_and_span_cover_the_swept_box_through_the_full_pose(cabinet_assets):
+    import asyncio
+    import math
+
+    from arena_simulation_setup.utils.geometry import Orientation, Position
+
+    upright = Obstacle(name="cabinet", model="Kitchen/TestSweptCabinet", pose=Pose(position=Position(2.0, 1.0, 0.0), orientation=Orientation.from_yaw(math.pi / 2)))
+    footprint = asyncio.run(upright.footprint())
+    assert footprint is not None
+    assert footprint.bounds == pytest.approx((1.7, 0.5, 3.3, 1.5))
+    assert footprint.area == pytest.approx(1.6)
+    assert asyncio.run(upright.span()) == pytest.approx((0.0, 1.0))
+    lying = Obstacle(name="cabinet", model="Kitchen/TestSweptCabinet", pose=Pose(position=Position(0.0, 0.0, 0.5), orientation=Orientation.from_euler((0.0, math.pi / 2, 0.0))))
+    footprint = asyncio.run(lying.footprint())
+    assert footprint is not None
+    assert footprint.bounds == pytest.approx((0.0, -1.3, 1.0, 0.3))
+    assert asyncio.run(lying.span()) == pytest.approx((0.0, 1.0))
+
+
+def test_obstacle_footprint_and_span_are_none_for_an_unresolvable_model(cabinet_assets):
+    import asyncio
+
+    ghost = Obstacle(name="ghost", model="Kitchen/TestMissingCabinet", pose=Pose())
+    assert asyncio.run(ghost.footprint()) is None
+    assert asyncio.run(ghost.span()) is None

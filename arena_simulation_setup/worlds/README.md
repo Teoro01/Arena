@@ -303,7 +303,15 @@ behavior (sequences, interactions, needs), see
 object annotation carries (see [AUTHORING.md](../AUTHORING.md#lights)), `scale: [x, y, z]` (default identity),
 `level` (multi-level worlds) and a `humansim:` block (`type`, `capacity`,
 `interaction_radius`, `formation`, `satisfies`, `seats`) that becomes its
-humansim `WorldObject` info. `humans` (`DynamicObstacle`) also takes
+humansim `WorldObject` info. An articulated object (one whose annotation
+carries `articulation:`) takes `joints:`, its initial joint values at every
+episode start: a state name (`joints: open`) or joint values, each a number
+(radians or meters) or a state name naming that joint (`joints: {door: open,
+drawer: 0.2}`). Joints left out start at the `closed` state, else at 0 within
+their limits. The same key applies to level `objects`. The
+`assets_articulation` MCP tool lists an object's joints and states, the
+[`articulated` semantic kind](../AUTHORING.md#articulated-objects) changes
+them during the episode. `humans` (`DynamicObstacle`) also takes
 `velocity` (m/s, default `1.0`), `waypoint_mode` (`repeat`, `reverse`, `once`,
 `random`), `level`, the humansim `agent:` block and a `hunav:` block for the
 HuNav backend. A human's `track: ./<file>.csv` names a recorded track beside the

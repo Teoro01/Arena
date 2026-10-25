@@ -363,7 +363,7 @@ def test_doors_become_world_objects() -> None:
 
 
 class _Simulator:
-    async def obstacle_delete(self, obstacles: typing.Sequence[object]) -> list[bool]:
+    async def delete_objects(self, obstacles: typing.Sequence[object]) -> list[bool]:
         return [True] * len(obstacles)
 
     async def pedestrian_delete(self, pedestrians: typing.Sequence[object]) -> list[bool]:

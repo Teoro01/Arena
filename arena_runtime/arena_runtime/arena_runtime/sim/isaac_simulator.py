@@ -201,6 +201,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
         self._robot_prims: dict[str, str] = {}
         self._shared_lights: set[str] = set()
+        self._box_centers: dict[str, tuple[float, float, float]] = {}
 
     def _robot_loader_args(self, robot: Robot) -> dict[str, object]:
         robot_config = arena_robots.Robot.RobotIdentifier(robot.model.name).resolve_sync()
@@ -411,7 +412,6 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
         results: list[bool] = [False] * len(obstacles)
 
-        # flat cube, bbox offset folded into the spawn pose (statics are delete+respawned, not moved)
         async def spawn_one_box(i: int) -> bool:
             obstacle = obstacles[i]
             size, center = typing.cast(tuple, boxes[i])
@@ -419,7 +419,11 @@ class IsaacSimulator(BaseSim, NodeInterface):
                 s = (obstacle.scale.x, obstacle.scale.y, obstacle.scale.z)
                 size = tuple(d * f for d, f in zip(size, s, strict=True))
                 center = tuple(c * f for c, f in zip(center, s, strict=True))
-            return bool(await self.spawn_box(self._NS_PRIM(obstacle.name), size, offset_pose(obstacle.pose, center)))
+            name = self._NS_PRIM(obstacle.name)
+            ok = bool(await self.spawn_box(name, size, offset_pose(obstacle.pose, center)))
+            if ok:
+                self._box_centers[name] = center
+            return ok
 
         for i, ok in zip(box_indices, await asyncio.gather(*(spawn_one_box(i) for i in box_indices)), strict=True):
             results[i] = bool(ok)
@@ -434,8 +438,13 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
         return tuple(results)
 
+    def _placement(self, obstacle: Obstacle) -> tuple[str, Pose]:
+        name = self._NS_PRIM(obstacle.name)
+        center = self._box_centers.get(name)
+        return name, obstacle.pose if center is None else offset_pose(obstacle.pose, center)
+
     async def obstacle_move(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
-        return await self._move_entities([(self._NS_PRIM(o.name), o.pose) for o in obstacles])
+        return await self._move_entities([self._placement(o) for o in obstacles])
 
     async def pedestrian_move(self, pedestrians: Sequence[DynamicObstacle]) -> Sequence[bool]:
         req = MovePedestrians.Request(
@@ -463,7 +472,10 @@ class IsaacSimulator(BaseSim, NodeInterface):
         return await asyncio.gather(*map(move_robot, robots))
 
     async def obstacle_delete(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
-        return await asyncio.gather(*(self._delete_entity(self._NS_PRIM(o.name)) for o in obstacles))
+        names = [self._NS_PRIM(o.name) for o in obstacles]
+        for name in names:
+            self._box_centers.pop(name, None)
+        return await asyncio.gather(*(self._delete_entity(name) for name in names))
 
     async def pedestrian_delete(self, pedestrians: Sequence[DynamicObstacle]) -> Sequence[bool]:
         res = await self._clients.DeletePedestrians.call_timeout(DeletePedestrians.Request(names=[p.sim_path for p in pedestrians]))

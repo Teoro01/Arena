@@ -62,6 +62,9 @@ Defined in [`_interface.py`](_interface.py):
 | `remove_elevators` | `(Sequence[str]) -> bool` | delete cabin geometry + synthesized door by name |
 | `stop_mechanisms` | `() -> None` | cancel the tick loop (call on shutdown) |
 | `attach_human_simulator` | `(HumanSimulator) -> None` | bind the human-sim Protocol that supplies ped positions + ped teleport |
+| `spawn_objects` | `(Sequence[Obstacle]) -> Sequence[bool]` | spawn obstacles, an articulated one as its link obstacles (see [Articulated objects](#articulated-objects)) |
+| `move_objects` | `(Sequence[Obstacle]) -> Sequence[bool]` | move obstacles, an articulated one reset to the initial values of its `joints` |
+| `delete_objects` | `(Sequence[Obstacle]) -> Sequence[bool]` | delete obstacles, an articulated one with its link obstacles and semantics |
 
 | Primitive (override required for default behavior) | Signature |
 | --- | --- |
@@ -131,6 +134,39 @@ Pedestrians ride like robots: the shim counts a ped inside a cabin footprint as 
 - Failed rides: a refused/raising robot or ped teleport releases the riders at once (source unsealed, the
   destination stops waiting), and the riders left in the source cabin call the car back. A silent failure is
   released after `TELEPORT_GRACE` (10 s sim time) with a warning.
+
+#### Articulated objects
+
+The human simulator places every static obstacle through `spawn_objects`,
+`move_objects` and `delete_objects` ([`_articulation.py`](_articulation.py)),
+which hand a plain obstacle unchanged to the simulator's `obstacle_*` verb.
+An obstacle whose object annotation carries `articulation:` and that has link
+bundles (`links/<link>/` under the object) expands into one static obstacle
+per link bundle, named and sim-pathed `<obstacle>__<link>`, its model the link
+bundle, posed at `obstacle.pose * link_pose` with the link translation scaled
+componentwise by `obstacle.scale` and the scale kept on the link. Each call
+sends all its obstacles to the simulator in one batch. Links without meshes
+have no bundle and no obstacle. MuJoCo spawns a link from the bundle's SDF, as
+it does any object, not from the Y-up OBJ the bundle carries for the URDF.
+Every simulator thus moves joints through the
+`obstacle_move` it already has, MuJoCo and Isaac keep the box center offset of
+a box-spawned obstacle when it moves, flatsim places each outline at the z
+span of the link box through its full pose.
+
+Each articulated obstacle keeps initial (`articulation.resolve(obstacle.joints)`),
+current and target joint values. A `move_objects` call, which is how the human
+simulator re-places a known obstacle at an episode reset, takes the new pose and
+`joints`, resets current and target to the new initial values and moves every
+link. On the mechanism tick each joint steps toward its target at its speed and
+the links whose pose changed go to `obstacle_move` in one batch per tick. A step
+that would put a moving link's footprint (its link box through the object and
+link pose, projected to xy) onto a robot or pedestrian disc holds the whole
+object for that tick and marks it `blocked`, it resumes once clear. The
+`articulated` semantic kind is attached under the env-prefixed obstacle name on
+spawn and detached on delete, its `reset()` returns the joints to their initial
+values and the next tick places the links, see
+[AUTHORING.md](../../../../arena_simulation_setup/AUTHORING.md#articulated-objects)
+for its fields.
 
 ### `SimLifecycle`
 

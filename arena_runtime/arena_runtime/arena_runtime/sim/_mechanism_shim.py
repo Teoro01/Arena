@@ -14,6 +14,7 @@ from arena_simulation_setup.shared.world import CABIN_DOOR_INSET as DOOR_INSET
 from arena_simulation_setup.shared.world import CABIN_DOOR_THRESHOLD, CABIN_DOOR_WIDTH, ActivationDistance
 from task_generator.shared import Door, Elevator, Orientation, Pose, Position
 
+from ._articulation import step_articulated
 from ._interface import _BOX_FLOOR_CLEARANCE
 
 if typing.TYPE_CHECKING:
@@ -765,7 +766,7 @@ def _report_incident(mech: MechanismITF, reason: str) -> None:
 
 
 async def _tick(mech: MechanismITF, dt: float) -> None:
-    """Single tick: update triggers, advance state machines, dispatch move_box and teleports."""
+    """Single tick: update triggers, advance state machines, dispatch move_box, articulated link moves and teleports."""
     robot_discs = list(mech.robot_discs())
     ped_discs: list[Disc] = list(mech._human_simulator.pedestrian_discs()) if mech._human_simulator is not None else []
     discs = robot_discs + ped_discs
@@ -835,6 +836,7 @@ async def _tick(mech: MechanismITF, dt: float) -> None:
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
     _check_door_conflicts(mech)
+    await step_articulated(mech, dt, discs)
 
     if mech._human_simulator is not None:
         door_changes: dict[str, bool] = {}
