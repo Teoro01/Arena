@@ -6,7 +6,8 @@ from pathlib import Path
 
 import yaml
 
-from arena_simulation_setup.tree import DomainAssetIdentifier, DynamicPaths, NetResolver
+from arena_simulation_setup import ASS_DIR
+from arena_simulation_setup.tree import DomainAssetIdentifier, DynamicPaths, NetResolver, SimplePathResolver
 
 STAIRS_KIND_KEYS = frozenset({'style', 'speed', 'tread', 'landing_length', 'plank', 'headroom', 'material', 'surfaces', 'sides', 'rails', 'models'})
 
@@ -25,4 +26,5 @@ class StairsIdentifier(DomainAssetIdentifier[dict]):
 
 
 StairsIdentifier.use(*DynamicPaths.as_resolvers(StairsIdentifier))
+StairsIdentifier.use(SimplePathResolver(StairsIdentifier, ASS_DIR / 'assets'))
 StairsIdentifier.use(*NetResolver.all(StairsIdentifier))

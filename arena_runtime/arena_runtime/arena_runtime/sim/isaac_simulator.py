@@ -843,7 +843,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
         self._map_offset_calls[sim_path] = call
 
     def _map_offset_done(self, name: str, call: rclpy.task.Future) -> None:
-        if call.cancelled() or call.exception() is not None or not call.result().success:
+        if call.cancelled() or call.exception() is not None or (result := call.result()) is None or not result.success:
             self._logger.warning(f"SetMapOffset failed for {name!r}, its map -> odom is stale")
 
     async def _delete_entity(self, name: str) -> bool:

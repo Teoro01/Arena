@@ -635,7 +635,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
 
     def _light_msg(self, light: LightDefinition) -> Light:
         spec = light.spec
-        fixtures = [] if spec.ambient else (light.fixtures if light.rig else [light.position if light.position is not None else light.offset])
+        fixtures = [] if spec.ambient else (light.fixtures if light.rig else [light.position])
         return Light(
             name=light.name,
             shape=spec.shape,

@@ -347,39 +347,43 @@ class Stairs(Named):
         start, end = self.ramp
         return [(a0, a1) for a0, a1 in ((0.0, start), (start, end), (end, self.length)) if a1 - a0 > 1e-9]
 
-    def _along_surface(self, across: float, style: dict, **heights: float) -> list[Wall]:
-        """Walls `across` metres left of the axis whose line follows the walking surface, their heights measured from it."""
-        return [Wall(start=self.local(a0, across, self.height(a0)), end=self.local(a1, across, self.height(a1)), **heights, **style) for a0, a1 in self._pieces()]
+    def _along_surface(self, across: float, style: tuple[str, MaterialIdentifier | None], *, top: float | None = None, bottom: float | None = None, height: float | None = None) -> list[Wall]:
+        """Walls `across` metres left of the axis in a (kind, material) style whose line follows the walking surface, their heights measured from it."""
+        kind, material = style
+        return [Wall(start=self.local(a0, across, self.height(a0)), end=self.local(a1, across, self.height(a1)), kind=kind, material=material, top=top, bottom=bottom, height=height) for a0, a1 in self._pieces()]
 
-    def _style(self, kind: str, material: MaterialIdentifier | None) -> dict:
-        return {'kind': kind} if kind else {'material': material if material is not None else self.material}
+    def _style(self, kind: str, material: MaterialIdentifier | None) -> tuple[str, MaterialIdentifier | None]:
+        return (kind, None) if kind else ('', material if material is not None else self.material)
 
     def walls(self) -> list[Wall]:
         """Walls that block the floor plan: each side's lining below the walking surface in the fixture material, reaching under the floor, and its wall above it, the seam wall, a top half's guards around its overhang, and the solid rails."""
         half = self.width / 2.0
-        fixture = {'material': self.material_of('fixture')}
+        fixture = self.material_of('fixture')
         low = (-self.rise if self.stacked else -self.rise / 2.0) if self.top else 0.0
         walls: list[Wall] = []
         for name, across in (('left', half), ('right', -half)):
             side = self.sides[name]
             if self.top:
-                walls.append(Wall(start=self.local(0.0, across), end=self.local(self.length, across), top=0.0, bottom=low, **fixture))
+                walls.append(Wall(start=self.local(0.0, across), end=self.local(self.length, across), material=fixture, top=0.0, bottom=low))
                 if side.height > 0.0:
-                    walls.append(Wall(start=self.local(0.0, across), end=self.local(self.length, across), height=side.height, **self._style(side.kind, side.material)))
+                    kind, material = self._style(side.kind, side.material)
+                    walls.append(Wall(start=self.local(0.0, across), end=self.local(self.length, across), kind=kind, material=material, height=side.height))
                 continue
-            walls.extend(self._along_surface(across, fixture, top=0.0, bottom=-(abs(self.height(self.length)) + self.riser + self.sink + STAIRS_BASE)))
+            walls.extend(self._along_surface(across, ('', fixture), top=0.0, bottom=-(abs(self.height(self.length)) + self.riser + self.sink + STAIRS_BASE)))
             if side.height > 0.0:
                 walls.extend(self._along_surface(across, self._style(side.kind, side.material), height=side.height))
         if not self.joined:
             top = self.height(self.length) + max(side.height for side in self.sides.values())
-            walls.append(Wall(start=self.local(self.length, -half), end=self.local(self.length, half), top=top, bottom=low, **fixture))
+            walls.append(Wall(start=self.local(self.length, -half), end=self.local(self.length, half), material=fixture, top=top, bottom=low))
         if self.top and self.overhang > 0.0:
             end = self.length + self.overhang
             guard = self.sides['left']
             for name, across in (('left', half), ('right', -half)):
                 side = self.sides[name]
-                walls.append(Wall(start=self.local(self.length, across), end=self.local(end, across), height=side.height, **self._style(side.kind, side.material)))
-            walls.append(Wall(start=self.local(end, -half), end=self.local(end, half), height=guard.height, **self._style(guard.kind, guard.material)))
+                kind, material = self._style(side.kind, side.material)
+                walls.append(Wall(start=self.local(self.length, across), end=self.local(end, across), kind=kind, material=material, height=side.height))
+            kind, material = self._style(guard.kind, guard.material)
+            walls.append(Wall(start=self.local(end, -half), end=self.local(end, half), kind=kind, material=material, height=guard.height))
         return [*walls, *(wall for rail in self.rails if rail.solid for wall in self._rail(rail))]
 
     def open_walls(self) -> list[Wall]:
@@ -389,12 +393,12 @@ class Stairs(Named):
             lift = (self.riser if self.style == 'steps' else STAIRS_GAP + self.plank) + STAIRS_BRUSH_LIFT
             inner = self.width / 2.0 - STAIRS_BRUSH_DEPTH
             for across in (inner, -inner):
-                walls.extend(self._along_surface(across, {'material': self.material_of('brushes')}, top=lift + STAIRS_BRUSH, bottom=lift))
+                walls.extend(self._along_surface(across, ('', self.material_of('brushes')), top=lift + STAIRS_BRUSH, bottom=lift))
         return walls
 
     def _rail(self, rail: StairsRail) -> list[Wall]:
         if rail.kind:
-            return self._along_surface(rail.across, {'kind': rail.kind}, height=rail.height)
+            return self._along_surface(rail.across, (rail.kind, None), height=rail.height)
         return self._along_surface(rail.across, self._style('', rail.material), top=rail.height, bottom=rail.height - STAIRS_HANDRAIL_BAR)
 
     @property

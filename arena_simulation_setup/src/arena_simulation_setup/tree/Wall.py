@@ -10,12 +10,14 @@ from pathlib import Path
 import attrs
 import yaml
 
+from arena_simulation_setup import ASS_DIR
 from arena_simulation_setup.shared.entities import Obstacle
 from arena_simulation_setup.tree import (
     DomainAssetIdentifier,
     DynamicPaths,
     Identifier,
     NetResolver,
+    SimplePathResolver,
 )
 from arena_simulation_setup.tree.assets.Material import Material, MaterialIdentifier
 from arena_simulation_setup.tree.assets.Object import ObjectIdentifier
@@ -279,4 +281,5 @@ class WallIdentifier(DomainAssetIdentifier[WallDescription]):
 
 
 WallIdentifier.use(*DynamicPaths.as_resolvers(WallIdentifier))
+WallIdentifier.use(SimplePathResolver(WallIdentifier, ASS_DIR / 'assets'))
 WallIdentifier.use(*NetResolver.all(WallIdentifier))

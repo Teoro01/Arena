@@ -365,7 +365,7 @@ keeps its own `width` (thickness).
 the axis), then either a `material` (default the staircase's `material`) for a
 5 cm bar whose top sits at `height` (default 0.9 m), or a wall `kind` whose
 parts stand on the walking surface, cut and stretched to `height` the way a
-side's are. The local asset root ships the wall kind `handrail` (in
+side's are. The package ships the wall kind `handrail` (in
 `arena_simulation_setup/assets/Common/Wall/`, resolved without copying): a
 5 cm bar at 0.85 to 0.9 m on 3 cm posts every 0.9 m. A plain bar has no posts.
 `solid: true` works on both forms: such a rail also blocks the floor plan, so
@@ -410,8 +410,8 @@ A staircase kind keeps a build and a look for reuse, the way a wall kind
 keeps a wall style. `kind: <name>` on an entry reads
 `<domain>/Stairs/<name>/<name>.yaml` (a bare name under `Common`), searched in
 the world's own `assets/`, the `assets/` of the worlds it links levels from,
-the local asset root (`$ARENA_ASSETS_DIR_LOCAL`, by default the repo's
-`arena_simulation_setup/assets`) and then the buckets. `arena asset ls stairs`
+the local asset root (`$ARENA_ASSETS_DIR_LOCAL`), the package's own
+`arena_simulation_setup/assets` and then the buckets. `arena asset ls stairs`
 lists them and `arena asset find stairs <name>` shows which source answers.
 
 A kind file is a flat mapping of the keys `style`, `speed`, `tread`,
@@ -437,7 +437,7 @@ entry's `rails` and `models` replace the kind's whole lists. Writing the world b
 `kind` and only the keys the entry sets itself. An entry without `kind` takes
 the defaults listed in the field reference.
 
-The repo ships three kinds:
+The package ships three kinds in `arena_simulation_setup/assets/Common/Stairs/`:
 
 | kind | style | build and look |
 | --- | --- | --- |
