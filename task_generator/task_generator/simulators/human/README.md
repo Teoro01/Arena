@@ -29,6 +29,8 @@ human-sim `_*_impl` methods:
 | `spawn_world(walls, doors, collision_walls=())` | spawn world geometry in both sim and human-sim layers. `collision_walls` register in the human-sim layer only (avoidance), never spawned visually |
 | `spawn_elevators(elevators)` | hand the realized cabins of the world to the human-sim layer through `_set_elevators_impl`, replacing those of the world before. The environment manager calls it before the physics sim's `spawn_elevators`, and `remove_obstacles(purge >= WORLD)` clears them |
 | `elevator_doors_changed(doors)` | cabin name to door open, called by the mechanism shim when a cabin door turns open or stops being open, forwarded to `_set_elevator_doors_impl` |
+| `spawn_stairs(stairs)` | sync, remember the realized stair halves of the world with every belt running. The environment manager calls it before `spawn_elevators`, which sends them along, and `remove_obstacles(purge >= WORLD)` clears them |
+| `stairs_changed(running)` | realized stair half name to belt running, called by the runtime when an escalator's `running` semantic changes. Kept per half and sent again with every zone through `_set_elevators_impl` |
 | `unuse_obstacles()` | call `_remove_obstacles_impl`, then flip all `INUSE` layers to `UNUSED` |
 | `remove_obstacles(purge)` | remove all obstacles at or below `purge` layer from both layers. `WORLD` survives unless `purge >= WORLD` |
 | `spawn_robot(robots)` | spawn in physics sim, start tracking the robot, then call `_spawn_robot_impl` |
@@ -53,6 +55,7 @@ specialized teleport semantics (e.g. resetting an internal agent list).
 | `pedestrian_clips()` | `() -> Mapping[str, frozenset[str]]` (sync, the gesture clips each ped is playing, from the same `arena_peds` message) |
 | `pedestrian_teleport(destinations)` | `(Mapping[str, tuple[float, float]]) -> bool` (async, dispatches via `relay_pedestrian_update`, `ArenaHumanSimulator` teleports in the engine instead, then sends each moved ped its next itinerary leg and the `teleported` stimulus) |
 | `elevator_doors_changed(doors)` | `(Mapping[str, bool]) -> None` (async) |
+| `stairs_changed(running)` | `(Mapping[str, bool]) -> None` (async) |
 | `configure(params)` | `(Sequence[rcl_interfaces.msg.Parameter]) -> list[Parameter]` (async). It runs at every episode reset with `QueueEpisode.human_params`. It strips the prefix from the names under `PARAM_NAMESPACE`, sorts them, and hands them to `_configure_impl`, also when there are none. It returns the accepted ones. |
 
 ### Abstract `_impl` methods
@@ -87,6 +90,9 @@ The filled field feeds the ROS4HRI skeleton in rviz through `hri_producer` and t
 A model whose bundle ships a `rig.yaml` with `drivers:` (wheelchair bundles: `l_wheel`, `r_wheel`) gets those joints
 set on top, whoever filled the field: [`drivers.py`](drivers.py) rolls each wheel over the distance its contact
 point covered since the last message, see the Driven joints section of [`JOINTS.md`](JOINTS.md).
+
+The same message goes out again on `<namespace>/sim_peds`, which the Gazebo pedestrian plugin reads: unchanged in a spread
+world, every ped moved into the simulator frame by `Realizer.placement()` when the levels are stacked (`world.levels`).
 
 ## Fitting a gait profile from a clip
 
@@ -485,6 +491,22 @@ pedestrian names to engine agent ids (the scenario or flow name, else the id its
 with engine-frame poses and the pedestrian's facing. The engine then moves the agent, the physics sim follows
 from the next engine frame, and the interpolation snaps a teleported agent instead of sliding it from the
 source cabin.
+
+Stair and escalator halves go out in the same `set_teleport_zones` call, after the cabins, as zones the engine
+teleports by itself: `entry` at the mouth and `wait` 0.8 m before it, both facing the seam, `hold` on the
+axis at the trigger line (`STAIRS_SEAM_INSET` before the seam), `footprint` the half's corners, `destinations`
+the partner half for a boarding half and empty for an exit-only escalator half or a half whose partner is
+on a level not loaded, `delay` 0, `kind` `stairs` or
+`escalator` and `belt` the escalator speed along the axis, positive towards the seam on the boarding half and
+negative on the exit half, 0 on stairs. A half counts as stopped once it, the half it boards or a half boarding
+it is reported not running through `stairs_changed` (`stair_running`): both halves of a stopped escalator go
+out with `belt` 0 and its boarding half with `open` false, every other half is open. Any step between two
+engine frames longer than `TELEPORT_JUMP_M` (2 m) is snapped rather than interpolated, so a crossing does not
+slide across the map.
+
+`publish_arena_peds` sets each pedestrian's z to the walking surface of the stair half it stands on
+(`stair_height`): rising from 0 at the mouth to half the stair's rise at the seam on a bottom half, sinking
+to minus half the rise on a top half, 0 off every stair.
 
 ## HuNavSim default agent template
 

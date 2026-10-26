@@ -91,6 +91,8 @@ def Configuration(server: ROSParamServer) -> type:
 
             WORLD_LIGHTING = server.ROSParam[str]('world.lighting', 'authored')
 
+            WORLD_LEVELS = server.ROSParam[str]('world.levels', 'auto')
+
             KG_DERIVE = server.ROSParam[str]('kg.derive', 'auto')
 
         class General:

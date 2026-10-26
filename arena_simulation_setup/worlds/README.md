@@ -33,13 +33,17 @@ as format 2, see [AUTHORING.md](../AUTHORING.md#format-1-worlds).
 | scope | key | content |
 | --- | --- | --- |
 | world | `format` | `arena-world/2`, required |
+| world | `layout` | `spread` by default, every level a floor plan of its own, or `stacked`, every level at its `elevation` over one shared floor plan, see [AUTHORING.md](../AUTHORING.md#stairs-and-escalators) |
 | world | `defaults` | `floor` (material or `false`), `ceiling` (mapping or `false`), `wall` (`{kind}` or `{material}`), `door` (any door field but `name`, `span`, `semantics`), inherited where an item does not set the key |
 | world | `schedules`, `signals` | standalone semantic entities, see [AUTHORING.md](../AUTHORING.md#m2-kinds-params-and-timelines) |
 | world | `levels` | list of levels, each with a unique `id`, written out or linked as `{from: <world>[:<level id>], id, prefix}` (a world name or a `./` path under this world, see [AUTHORING.md](../AUTHORING.md#linked-levels)) |
+| level | `elevation` | floor height in metres, by default a storey of 3 m per level before it |
 | level | `zones` | `name`, `polygon`, `floor`, `ceiling`, `walls`, `semantics` |
 | level | `walls` | `{path, closed, kind or material}` polylines |
 | level | `doors` | see [Door fields](#door-fields) |
 | level | `elevators` | see [Elevator fields](#elevator-fields) |
+| level | `stairs` | stairs up from this level, see [Stairs fields](#stairs-fields) |
+| level | `escalators` | escalators up from this level, see [Stairs fields](#stairs-fields) |
 | level | `objects` | static obstacles, the scenario `objects:` schema |
 | level | `humans` | pedestrians, the scenario `humans:` schema |
 | level | `lights` | fixtures and ambient lights, see [AUTHORING.md](../AUTHORING.md#lights) |
@@ -109,6 +113,38 @@ the result from `Level.all_walls`.
 | `accept_outside_calls` | `true` | whether hallway buttons can summon the cabin |
 | `recall_on` | `null` | regime name. While asserted, refuses calls and holds the cabin door open |
 | `semantics` | `[]` | attaches a scripted kind, see AUTHORING.md |
+
+### `Stairs` fields
+
+A `stairs:` (fixed) or `escalators:` (moving) entry is one whole staircase
+from its level up to another. See
+[AUTHORING.md](../AUTHORING.md#stairs-and-escalators) for incline guidance,
+how it splits into halves and opens floors, dressing and staircase kinds.
+
+| key | default | meaning |
+| --- | --- | --- |
+| `name` | required | unique across the world, `<name>_bottom` and `<name>_top` name its halves |
+| `kind` | none | a staircase kind (`<domain>/Stairs/<name>/<name>.yaml`, the repo ships `stairs`, `escalator`, `belt_escalator`) whose keys the entry takes, its own keys winning |
+| `mouth` | required | middle of the open lower end, also for `direction: down` |
+| `mouth_side` | `-x` | side the stair is entered from (`+x`, `-x`, `+y`, `-y`), it runs away from it |
+| `size` | `[5.2, 1.4]` | `[length, width]` of the whole staircase in metres, length along the walking direction, width between the side walls' center lines, both positive. The length and the rise set the incline |
+| `to` | required | id of the level the stair reaches, above its own |
+| `exit` | none | spread worlds only and required there: middle of the open upper end on the `to` level |
+| `direction` | `up` | escalators only: `up` or `down` |
+| `speed` | `0.5` | escalator belt speed along the axis in m/s, positive |
+| `style` | `steps` | escalator treads: `steps` (moving step blocks, level with the floor over a `landing_length` landing at each mouth) or `belt` (an inclined conveyor of moving planks). Stairs take only `steps` |
+| `tread` | `0.28` | step depth in metres a half aims for, positive: it takes `round(length / 2 / tread)` treads, stretched to fit |
+| `landing_length` | `0.8` | level run at each mouth of a step escalator, in `[0, length / 2)`. Stairs and belts ignore it |
+| `plank` | `0.03` | thickness of a belt escalator's moving planks, positive |
+| `headroom` | `2.1` | clearance under the upper floor below which a stacked stair opens it, positive |
+| `material` | `Marble` | `MaterialIdentifier` of every part of the staircase a key below does not set |
+| `surfaces` | none | `{steps, risers, landings, fixture, brushes}`, a material each, or `{material, model}` for all but `brushes` to put an object on every box of that surface: treads, stair risers, escalator landing plates, escalator base plus side linings and seam wall, escalator skirt brushes (default `Carpet_Charcoal`) |
+| `sides` | `1.0` m high in `material` | `{left, right}` seen walking up, each `{kind or material, height}`, `height` above the walking surface, 0 for no side wall |
+| `rails` | none | list of `{across, kind or material, height, solid}`: `across` is `left`, `right` (8 cm inside the sides) or metres left of the axis, `material` defaults to the staircase's, `height` (default 0.9) is the top of a plain 5 cm bar, `solid: true` blocks the floor plan |
+| `models` | none | list of `{model, at, yaw}`: objects such as splat captures in the staircase frame, `at` `[along, across, z]` from the middle of the mouth on the lower floor, `yaw` from the axis |
+
+The world's top-level `layout` (`stacked` or `spread`, default `spread`) and
+each level's `elevation` (default a storey of 3 m per level) set the rise.
 
 ### `microphones`
 
@@ -481,3 +517,4 @@ wrapping whichever of the above resolved first. Call `view.load()` to parse
 | `map_empty` | Single open zone |
 | `office_1` | Office floor plan |
 | `reception` | Reception area |
+| `stairs_demo` | Two levels joined by a stair, an up escalator on a belt and a down escalator on steps |

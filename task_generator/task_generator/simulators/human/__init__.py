@@ -27,6 +27,7 @@ from arena_runtime._node import NodeInterface
 from arena_runtime.lockstep import register_channels
 from arena_runtime.sim import BaseSim
 from arena_runtime_msgs.msg import LockstepChannel
+from arena_simulation_setup.shared import Placement, Stairs
 from arena_simulation_setup.tree.assets.Human import HumanIdentifier
 from arena_simulation_setup.utils.models import ModelType
 from geometry_msgs.msg import Pose as PoseMsg
@@ -64,6 +65,28 @@ _STREAM_QOS = rclpy.qos.QoSProfile(
     history=rclpy.qos.HistoryPolicy.KEEP_LAST,
     depth=1,
 )
+
+
+def placed_peds(msg: Pedestrians, placement: Placement) -> Pedestrians:
+    """The pedestrians of `msg` in the simulator frame, `msg` itself while the levels are not stacked."""
+    if not placement.stacked:
+        return msg
+    placed = copy.deepcopy(msg)
+    for ped in placed.pedestrians:
+        position = placement.place(Position(ped.pose.position.x, ped.pose.position.y, ped.pose.position.z))
+        ped.pose.position.x, ped.pose.position.y, ped.pose.position.z = position.x, position.y, position.z
+    return placed
+
+
+def stair_height(stairs: Iterable[Stairs], x: float, y: float) -> float:
+    """Walking surface height at a map point on the first stair half holding it, 0 off every stair."""
+    return next((stair.height(stair.along(x, y)) for stair in stairs if stair.contains(x, y, stair.reach)), 0.0)
+
+
+def stair_running(stair: Stairs, stairs: Iterable[Stairs], running: Mapping[str, bool]) -> bool:
+    """Whether a stair half's belt moves: not once it, the half it boards or a half boarding it is reported stopped."""
+    linked = {stair.name, stair.to} | {other.name for other in stairs if other.to == stair.name}
+    return all(running.get(name, True) for name in linked if name)
 
 
 @attrs.define
@@ -156,10 +179,13 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
         self._wall_counter = itertools.count()
         self._known_regions: dict[str, Region] = {}
         self._known_elevators: tuple[Elevator, ...] = ()
+        self._known_stairs: tuple[Stairs, ...] = ()
+        self._stair_running: dict[str, bool] = {}
         self._robots: dict[str, TrackedRobot] = {}
         self._warned_unresolved_models: set[str] = set()
         self._ped_model_uris: dict[str, str] = {}
         self._arena_peds_publisher = self.node.create_publisher(Pedestrians, self._namespace("arena_peds"), 10)
+        self._sim_peds_publisher = self.node.create_publisher(Pedestrians, self._namespace("sim_peds"), 10)
         self._animation_states_publisher = self.node.create_publisher(AnimationStates, self._namespace("animation_states"), 10)
         self._marker_publisher = LazyPublisher(
             self.node.create_publisher(
@@ -280,6 +306,7 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
             animation.peds.append(self._animation_state(ped))  # pyright: ignore[reportAttributeAccessIssue]
 
         for ped in out.pedestrians:
+            ped.pose.position.z = stair_height(self._known_stairs, ped.pose.position.x, ped.pose.position.y)
             drivers = self._drivers_for(ped.model_uri)
             if not drivers:
                 continue
@@ -288,6 +315,7 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
             ped.joint_state.name, ped.joint_state.position = with_driven(ped.joint_state.name, ped.joint_state.position, angles)
 
         self._arena_peds_publisher.publish(out)
+        self._sim_peds_publisher.publish(placed_peds(out, self._realizer.placement()))
         self._animation_states_publisher.publish(animation)
 
     def _animation_state(self, ped: Pedestrian) -> AnimationState:
@@ -760,10 +788,23 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
 
     async def spawn_elevators(self, elevators: Sequence[Elevator]) -> bool:
         """Hand the realized elevator cabins of the world to the human simulator, replacing those of the world before."""
-        if not elevators and not self._known_elevators:
+        if not elevators and not self._known_elevators and not self._known_stairs:
             return True
         self._known_elevators = tuple(elevators)
         return await self._set_elevators_impl(self._known_elevators)
+
+    def spawn_stairs(self, stairs: Sequence[Stairs]) -> None:
+        """Remember the realized stair halves of the world, sent along with the next elevators, every belt running."""
+        self._known_stairs = tuple(stairs)
+        self._stair_running = {}
+
+    async def stairs_changed(self, running: Mapping[str, bool]) -> None:
+        """Escalator halves by realized name whose belt started (True) or stopped (False), every teleport zone sent again."""
+        self._stair_running.update(running)
+        await self._set_elevators_impl(self._known_elevators)
+
+    def _stair_runs(self, stair: Stairs) -> bool:
+        return stair_running(stair, self._known_stairs, self._stair_running)
 
     async def elevator_doors_changed(self, doors: Mapping[str, bool]) -> None:
         """Cabin doors by realized cabin name that turned open (True) or stopped being open (False)."""
@@ -964,8 +1005,10 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
             await self._clear_mechanism_walls()
             self._semantic_values.clear()
             futures.append(self._simulator.remove_world())
-            if self._known_elevators:
+            if self._known_elevators or self._known_stairs:
                 self._known_elevators = ()
+                self._known_stairs = ()
+                self._stair_running = {}
                 futures.append(self._set_elevators_impl(()))
 
         if stale_walls:

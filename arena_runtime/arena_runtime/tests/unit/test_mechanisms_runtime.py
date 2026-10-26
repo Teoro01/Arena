@@ -122,6 +122,8 @@ class _Mech:
         self._elevator_doors: dict[str, str] = {}
         self._door_primitives: dict[str, list[str]] = {}
         self._elevator_primitives: dict[str, list[str]] = {}
+        self._stair_runtime: dict = {}
+        self._stair_primitives: dict[str, list[str]] = {}
         self._mechanism_loop_task = _BusyTask()
         self._robots: dict[str, tuple[float, float]] = {}
         self._lights: dict = {}

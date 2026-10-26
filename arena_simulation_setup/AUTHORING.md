@@ -53,6 +53,7 @@ and a zone's `name`:
 
 ```yaml
 format: arena-world/2
+layout: spread                           # or stacked: levels share one floor plan at their elevations
 defaults:                                # inherited by every level and item that does not set its own
   floor: Concrete_Smooth                 # material, or false for no floor
   ceiling: {height: 2.7, material: Concrete_Smooth}   # or false for open zones
@@ -62,6 +63,7 @@ schedules: [...]                         # world scope, see M2 kinds below
 signals: [...]
 levels:
 - id: '0'
+  elevation: 0.0                         # floor height, a storey of 3 m per level before it by default
   pedestrian_walls: true                 # false drops the occupancy-detected pedestrian walls
   zones:
   - name: central_hallway
@@ -77,6 +79,10 @@ levels:
   - {name: main_entrance, span: [[9.25, 0], [10.75, 0]]}
   elevators:
   - {name: lift_0, position: [5, 0], destinations: [lift_1]}
+  stairs:
+  - {name: stairs_0, kind: stairs, mouth: [16, 2], size: [5.2, 1.4], to: '1', exit: [16, 2]}
+  escalators:
+  - {name: up_0, kind: belt_escalator, mouth: [16, 6], size: [14.0, 1.0], to: '1', exit: [16, 6]}
   objects:
   - {name: desk_1, model: Common/Desk, pose: [2.0, 1.0, 1.5708]}
   humans: []
@@ -93,11 +99,11 @@ Key points:
 - A zone is a named region: its `polygon` (an open ring, the interior is
   navigable floor), its `floor` and `ceiling`, its runtime `semantics`, and
   optionally walls along its outline. It holds nothing else. Walls, doors,
-  elevators, objects, humans, lights, sounds and microphones are lists of the
-  level, and which zone a thing belongs to is a semantic fact (see
+  elevators, stairs, escalators, objects, humans, lights, sounds and
+  microphones are lists of the level, and which zone a thing belongs to is a semantic fact (see
   [KG](#kg)).
-- Every name (zone, door, elevator, object, human, light, sound, schedule,
-  signal) is unique across the whole world, so a reference never needs a
+- Every name (zone, door, elevator, stair or escalator half, object, human,
+  light, sound, schedule, signal) is unique across the whole world, so a reference never needs a
   level. Loading fails on a repeated name, on a key the format does not know
   (the error names the YAML path, e.g. `levels[0].doors[3]: unknown keys
   ['heigth']`) and on a reference to an unknown name.
@@ -142,7 +148,8 @@ before every name of the level and every reference to one, so the same floor
 can repeat (`- {id: '3', from: ./floors/typical, prefix: f3_}`) and two worlds
 sharing a zone name can sit side by side. Names stay
 unique across the composed world, elevator destinations that point outside
-it are dropped with a warning, and a link back into a world already being
+it and staircase halves whose partner half is outside it lose that link with
+a warning, and a link back into a world already being
 read is an error. Assets local to a linked world (`<world>/assets/`) resolve
 after this world's own. Saving the world writes the links, not the levels
 they name. `arena asset push world` refuses a world whose `./` or `../` link
@@ -245,6 +252,251 @@ Pedestrians see mechanisms as walls where they cannot pass: cabin back and
 side walls always, and a door's segment while it cannot open for them (a
 gate effectively locked with no authorized agent near, or
 `activation_distance <= 0` with no pressed plate driving it).
+
+### Stairs and escalators
+
+Stairs is the umbrella for both kinds of staircase: fixed stairs under
+`stairs:` and moving ones under `escalators:`. Full field reference:
+[Stairs fields](worlds/README.md#stairs-fields).
+
+#### Placing a staircase
+
+A `stairs:` or `escalators:` entry sits on the lower of the two levels it
+joins and names one whole staircase:
+
+| key | meaning |
+| --- | --- |
+| `name` | unique across the world |
+| `mouth` | `[x, y]` middle of the open lower end, in the level frame |
+| `mouth_side` | side it is entered from (`+x`, `-x`, `+y`, `-y`, default `-x`), the staircase running away from it |
+| `size` | `[length, width]` of the whole staircase in metres, length along the walking direction |
+| `to` | id of the level it reaches, above its own |
+| `exit` | spread worlds only: `[x, y]` middle of the open upper end on the `to` level, in that level's frame |
+| `kind` | optional staircase kind to start from, see below |
+
+The rise is the difference of the two levels' `elevation`, a level without
+one sitting a storey (3 m) above the level before it. An escalator with
+`direction: down` still sits on the lower level with its mouth at the bottom,
+`direction` only sets which way it carries.
+
+The world's `layout` says how its levels relate. In a `stacked` world every
+level shares one floor plan and the staircase runs straight up from its
+mouth. In a `spread` world (the default) every level keeps a floor plan of
+its own, and the entry also takes `exit`.
+
+`size` sets the incline, nothing else does, and nothing rejects a steep one:
+
+| staircase | incline | typical | `size` length for a 3 m rise |
+| --- | --- | --- | --- |
+| stairs | `atan(rise / length)` | 30 to 35 degrees | 5.2 m (30 degrees) |
+| step escalator | `atan(rise / (length - 2 * landing_length))` | 30 degrees | 6.8 m (30 degrees with 0.8 m landings) |
+| belt escalator | `atan(rise / length)` | up to 12 degrees | 14 m (12 degrees) |
+
+`width` is the distance between the center lines of the two side walls,
+which are 5 cm thick. Real stairs run 1.0 to 2.5 m wide and escalators 0.8 to
+1.2 m. An escalator's moving treads leave 6 cm clear on each side, and its
+brushes reach 5 cm in from each side wall. Keep about half a metre of clear
+floor before each escalator mouth: the pit there is one tread deep along the
+axis (about 0.3 m).
+
+#### What loading builds
+
+Loading splits a staircase at its midpoint into two halves, `<name>_bottom`
+on its level and `<name>_top` on the `to` level. `<name>` names the whole
+staircase, `<name>_bottom` and `<name>_top` each half, as places for
+`robot in` atoms and zone references in scenarios, and the KG places each
+half in the zone holding its center with `connects_floor` to the other. A
+linked level prefixes all three names alike. Left and right always mean as
+seen walking up from the mouth, loading mirrors them for the top half.
+
+Stairs are solid steps, the bottom half rising from the floor and the top
+half a well sinking from the upper floor to meet it. Floors and ceilings open
+around a staircase by themselves:
+
+- the upper floor over the top half, and in a stacked world also over the
+  end of the bottom half where less than `headroom` (default 2.1 m) is left
+  under it, with guard walls in the style of the sides around that overhang
+  on the upper level,
+- the lower floor under a step escalator, whose treads run level with the
+  floor over a landing at each mouth (`landing_length`, default 0.8 m), and
+  a short pit before each escalator mouth,
+- in a stacked world, the lower level's ceilings over the overhang and the
+  top half.
+
+Zone ceiling heights are measured from the level's own floor. The floor of
+the level above is a separate slab and does not stand in for a ceiling.
+
+An escalator's treads come out from under a landing plate flush with the
+floor at each mouth, 1 mm low until they clear it, then rise into place. The
+plate is a comb: treads pass through it, robots and pedestrians stand on it.
+
+#### Dressing
+
+`material` covers every part of a staircase (default `Marble`), and
+`surfaces` sets one part apart:
+
+| surface | parts | default |
+| --- | --- | --- |
+| `steps` | stair treads, escalator steps, belt planks | `material` |
+| `risers` | stair risers, setting it makes each step a 2 cm tread plate on a riser body | `material` |
+| `landings` | an escalator's landing plates | `material` |
+| `fixture` | an escalator's base, the side linings under the walking surface, the seam wall | `material` |
+| `brushes` | the skirt brushes along both inner sides of an escalator, just above its treads | `Carpet_Charcoal` |
+
+A surface takes any material name (`arena asset ls material` lists them, for
+example `Aluminum_Anodized`, `Carpet_Charcoal` (near black), `Concrete_Smooth`,
+`Marble`, `Oak_Planks`, `Paint_Gloss` and `Paint_Matte` (white),
+`Plaster_Wall`, `Walnut_Planks`), or `[Name, {tint: "<css colour>"}]` for a
+tinted copy: the colour, such as `rgba(90, 90, 90, 0.8)` (0 to 255 per
+channel), is blended over the material's textures with its alpha as the
+strength, so an alpha of 1 gives a solid colour.
+
+`sides` takes `left` and `right`, each with a wall `kind` or a `material`
+(default the staircase's `material`) and a `height` above the walking surface
+(default 1.0 m, 0 for no side wall). On the bottom half a side follows the
+incline, on the top half it guards the well along the upper floor. A wall
+kind on a side keeps its layers and tiled models along it: a layer starting
+above `height` is dropped, one crossing it is cut there, and the layer
+reaching highest is stretched up to `height` if it falls short. Each layer
+keeps its own `width` (thickness).
+
+`rails` lists handrails along the walking surface. Each takes `across`
+(`left` and `right` sit 8 cm inside the side walls, a number is metres left of
+the axis), then either a `material` (default the staircase's `material`) for a
+5 cm bar whose top sits at `height` (default 0.9 m), or a wall `kind` whose
+parts stand on the walking surface, cut and stretched to `height` the way a
+side's are. The local asset root ships the wall kind `handrail` (in
+`arena_simulation_setup/assets/Common/Wall/`, resolved without copying): a
+5 cm bar at 0.85 to 0.9 m on 3 cm posts every 0.9 m. A plain bar has no posts.
+`solid: true` works on both forms: such a rail also blocks the floor plan, so
+a center rail at `across: 0` splits a staircase into two lanes of equal
+width for robots and pedestrians. Other rails are seen and collided with but
+not routed around.
+
+Every part of a staircase can carry a captured look, such as a 3D Gaussian
+splat (`arena-assets splat --object`), which Isaac renders and the other
+simulators skip:
+
+- `steps`, `risers`, `landings` and `fixture` take `{material, model}` in
+  place of a bare material. The `model` (any object) is placed on the middle
+  of the top face of every box of that surface, turned with it: on each step
+  and riser, each landing plate, each base slab, and on each moving tread,
+  which it rides. The box keeps its `material` and stays the collision,
+  lidar and backdrop, the way a splat wall keeps its segment.
+- `models` lists objects for the staircase as a whole, each with `model`,
+  `at: [along, across, z]` (default `[0, 0, 0]`) from the middle of the
+  mouth on the lower floor, `along` running up the whole staircase, `across`
+  to the left, and `yaw` from the axis (default 0). A capture of a whole real
+  staircase goes here, as does anything that dresses the brushes or the
+  linings.
+- Side walls and rails carry anything a wall kind can, a splat included.
+
+```yaml
+escalators:
+- name: esc_up
+  kind: escalator
+  mouth: [2.0, 7.2]
+  size: [6.8, 1.0]
+  to: '1'
+  surfaces:
+    steps: {material: Aluminum_Anodized, model: mall_escalator_step}
+  models:
+  - {model: mall_escalator_shell, at: [3.4, 0.0, 0.0]}
+```
+
+#### Staircase kinds
+
+A staircase kind keeps a build and a look for reuse, the way a wall kind
+keeps a wall style. `kind: <name>` on an entry reads
+`<domain>/Stairs/<name>/<name>.yaml` (a bare name under `Common`), searched in
+the world's own `assets/`, the `assets/` of the worlds it links levels from,
+the local asset root (`$ARENA_ASSETS_DIR_LOCAL`, by default the repo's
+`arena_simulation_setup/assets`) and then the buckets. `arena asset ls stairs`
+lists them and `arena asset find stairs <name>` shows which source answers.
+
+A kind file is a flat mapping of the keys `style`, `speed`, `tread`,
+`landing_length`, `plank`, `headroom`, `material`, `surfaces`, `sides`,
+`rails` and `models`, in the same form as on an entry. Any other key, `kind` included, is
+an error named by the entry's YAML path, so kinds do not chain. Placement
+(`mouth`, `mouth_side`, `size`, `to`, `exit`, `direction`) always stays on
+the entry.
+
+```yaml
+# assets/Common/Stairs/office_stairs/office_stairs.yaml
+material: Walnut_Planks
+surfaces: {risers: Paint_Matte}
+sides: {left: {material: Paint_Gloss}, right: {material: Plaster_Wall}}
+rails:
+- {across: left, kind: handrail}
+- {across: right, kind: handrail}
+```
+
+The entry's own keys win over the kind's. `surfaces` and each side merge key
+by key, a side's own `kind` or `material` replacing the kind's, and the
+entry's `rails` and `models` replace the kind's whole lists. Writing the world back keeps
+`kind` and only the keys the entry sets itself. An entry without `kind` takes
+the defaults listed in the field reference.
+
+The repo ships three kinds:
+
+| kind | style | build and look |
+| --- | --- | --- |
+| `stairs` | steps | `handrail` rails on both sides, everything else default |
+| `escalator` | steps | `Aluminum_Anodized` steps and landing plates, `Concrete_Smooth` fixture, `Paint_Gloss` sides, `Carpet_Charcoal` handrails at 1.0 m, everything else default |
+| `belt_escalator` | belt | as `escalator` with `Carpet_Charcoal` planks |
+
+The kinds set no `speed`, `tread`, `landing_length` or `brushes`, so those
+take their defaults unless the entry sets them.
+
+```yaml
+escalators:
+- {name: esc_up, kind: belt_escalator, mouth: [2.0, 5.0], size: [14.0, 1.0], to: '1', speed: 0.6}
+```
+
+#### Moving stairs
+
+Stairs run both ways. An escalator carries riders `direction: up` (default)
+or `down` at `speed` (default 0.5 m/s), and its `style` is `steps` (moving
+step blocks) or `belt` (an inclined conveyor of moving planks). Stairs take
+only `steps`. `tread` sets the step depth a half aims for (default 0.28 m): a
+half takes `round(length / 2 / tread)` treads, and the riser is the half rise
+over that count. `plank` (default 0.03 m) is a belt's plank thickness.
+`size`, `speed`, `tread`, `plank` and `headroom` are positive,
+`landing_length` lies in `[0, length / 2)`, and `to` names a level above.
+Loading names the YAML path of a broken entry.
+
+```yaml
+layout: stacked
+levels:
+- id: '0'
+  zones:
+  - {name: lobby, polygon: [[0, 0], [20, 0], [20, 10], [0, 10]]}
+  stairs:
+  - {name: stairs, kind: stairs, mouth: [6.0, 2.0], size: [5.2, 2.0], to: '1'}
+  escalators:
+  - {name: esc_up, kind: belt_escalator, mouth: [2.0, 5.0], size: [14.0, 1.0], to: '1'}
+  - {name: esc_down, kind: escalator, mouth: [6.0, 7.2], size: [6.8, 1.0], to: '1', direction: down}
+- id: '1'
+  elevation: 3.0
+  zones:
+  - {name: gallery, polygon: [[0, 0], [20, 0], [20, 10], [0, 10]]}
+```
+
+This is the `stairs_demo` world without its stair dressing: the belt rises
+3 m over 14 m (12 degrees), the stairs at 30 degrees and the step escalator
+at 30 degrees past its landings.
+
+#### Stacked levels
+
+`world.levels:=stack|spread|auto` (default `auto`) chooses how the simulator
+places the levels. `spread` lays them side by side, and a crossing of a seam
+teleports to the other half. `stack` puts each level of a stacked world at
+its elevation over the shared floor plan, and each stair is one body walked
+and ridden straight through, without a seam wall. `auto` stacks a stacked
+world and spreads a spread one, `stack` on a spread world fails. The map,
+the pedestrian simulation, the judge and evaluation keep the side-by-side
+layout in either case: a robot's `map -> odom` follows the level it stands
+on, and pedestrians reach the simulator on `sim_peds` in its own frame.
 
 ### Microphones
 
@@ -909,7 +1161,7 @@ reach.
 Assets placed under `worlds/$WORLD/assets/<domain>/<Type>/<name>/` are
 resolved before shared-local (`$ARENA_ASSETS_DIR_LOCAL`), imported (`$ARENA_ASSETS_DIR_IMPORTED`) and network-fetched
 assets. `<domain>` defaults to `Common` if you have no reason to scope the
-asset further. Five asset kinds can be shipped this way:
+asset further. Six asset kinds can be shipped this way:
 
 | Type | Directory contents | Referenced as |
 |---|---|---|
@@ -918,6 +1170,7 @@ asset further. Five asset kinds can be shipped this way:
 | `Material` | `<name>.mdl` plus its texture files | a zone `floor`, a ceiling `material`, a wall or door `material` |
 | `Wall` | `<name>.yaml`, a `WallDescription` (see [configs/walls/README.md](configs/walls/README.md)) | `kind:` on a `walls:` entry or a zone outline |
 | `Sound` | `<name>.yaml` (a sound manifest, see [configs/sounds/README.md](configs/sounds/README.md)) plus its wav files | `asset_id:` on a `sounds:` entry |
+| `Stairs` | `<name>.yaml`, a staircase kind (see [Staircase kinds](#staircase-kinds)) | `kind:` on a `stairs:` or `escalators:` entry |
 
 To ship a custom wall style:
 
@@ -926,10 +1179,11 @@ mkdir -p worlds/$WORLD/assets/Common/Wall/my_style
 # create worlds/$WORLD/assets/Common/Wall/my_style/my_style.yaml
 ```
 
-Then reference it in `world.yaml` walls as `kind: my_style`. The other four
+Then reference it in `world.yaml` walls as `kind: my_style`. The other five
 kinds follow the same `assets/<domain>/<Type>/<name>/` layout. Objects, humans
 and materials carry model or material files instead of a preset YAML, a sound
-carries its `<name>.yaml` manifest beside the wav files.
+carries its `<name>.yaml` manifest beside the wav files, and a staircase kind
+is its `<name>.yaml` alone.
 
 A wall style can also carry a captured look: a 3D Gaussian splat that Isaac
 renders in front of the wall. The

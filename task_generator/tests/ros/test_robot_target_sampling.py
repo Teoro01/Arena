@@ -34,6 +34,7 @@ def _manager(blocked: tuple[float, float, float, float] | None, seed: int = 0) -
     world_manager._map.level_origins = {}
     world_manager._multi_map = None
     world_manager._zone_masks = {}
+    world_manager._stair_masks = {}
     world_manager._world = World(levels={"0": Level(id="0", zones=[Zone(name="room", polygon=ROOM)])})
     rng = EpisodeRng()
     rng.reseed(seed)

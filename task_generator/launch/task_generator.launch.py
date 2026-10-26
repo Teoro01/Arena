@@ -180,6 +180,12 @@ def generate_launch_description() -> launch.LaunchDescription:
         choices=["authored", "auto"],
         description="authored: the lights the world declares. auto: also a calibrated ceiling rig in every zone with a ceiling and no lights of its own.",
     )
+    world_levels = LaunchArgument(
+        name="world.levels",
+        default_value="auto",
+        choices=["auto", "stack", "spread"],
+        description="stack: levels above one another in the simulator, stair and escalator pairs joined at their seams. spread: levels side by side. auto: stack when the world has stairs or escalators and the simulator stacks (gazebo), else spread.",
+    )
     kg_derive = LaunchArgument(
         name="kg.derive",
         default_value="auto",
@@ -463,6 +469,7 @@ def generate_launch_description() -> launch.LaunchDescription:
                     "task.modules": tm_modules_val,
                     **world.str_param,
                     "world.lighting": world_lighting.param_value(str),
+                    "world.levels": world_levels.param_value(str),
                     "kg.derive": kg_derive.param_value(str),
                     "auditory.static_sounds": auditory_static_sounds.param_value(str),
                     "robot.train": train_mode.param_value(bool),

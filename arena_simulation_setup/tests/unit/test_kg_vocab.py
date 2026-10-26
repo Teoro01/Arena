@@ -22,18 +22,21 @@ def test_core2_adds_placeable_kinds_and_placed_prop():
         assert vocab.props(kind) == ["label"]
     assert "placed" in vocab.props("obj")
     assert vocab.verbs["contains"]["from"] == ["floor", "room"]
-    assert vocab.verbs["contains"]["to"] == ["room", "obj", "door", "wall", "elevator", "light", "sound", "microphone"]
+    assert vocab.verbs["contains"]["to"] == ["room", "obj", "door", "wall", "elevator", "stair", "light", "sound", "microphone"]
 
 
-def test_core2_keeps_connects_floor_between_elevators():
-    assert Vocabulary(["core@2"]).verbs["connects_floor"] == {"from": ["elevator"], "to": ["elevator"]}
+def test_core2_connects_floor_joins_elevators_and_stairs():
+    vocab = Vocabulary(["core@2"])
+    assert vocab.verbs["connects_floor"] == {"from": ["elevator", "stair"], "to": ["elevator", "stair"]}
+    assert vocab.is_propless("stair")
+    assert "stair" not in vocab.authorable()
 
 
-def test_core2_matches_core1_outside_obj_contains_and_new_kinds():
+def test_core2_matches_core1_outside_obj_contains_connects_floor_and_new_kinds():
     core1, core2 = load_package(PACKAGES_DIR / "core@1.toml"), load_package(PACKAGES_DIR / "core@2.toml")
     assert core2.constraints == core1.constraints
-    assert {k: v for k, v in core2.verbs.items() if k != "contains"} == {k: v for k, v in core1.verbs.items() if k != "contains"}
-    assert {k: v for k, v in core2.nodes.items() if k not in ("obj", "light", "sound", "microphone")} == {k: v for k, v in core1.nodes.items() if k != "obj"}
+    assert {k: v for k, v in core2.verbs.items() if k not in ("contains", "connects_floor")} == {k: v for k, v in core1.verbs.items() if k not in ("contains", "connects_floor")}
+    assert {k: v for k, v in core2.nodes.items() if k not in ("obj", "stair", "light", "sound", "microphone")} == {k: v for k, v in core1.nodes.items() if k != "obj"}
 
 
 def test_bare_package_name_resolves_to_newest_version():

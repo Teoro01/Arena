@@ -1,11 +1,12 @@
 import asyncio
+import copy
 import itertools
 import math
 import os
 import traceback
 import types
 import typing
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import arena_people_msgs.msg
 import arena_robots.catalog
@@ -18,6 +19,7 @@ import isaacsim_msgs.msg
 import launch
 import launch.event_handlers
 import launch_ros
+import rclpy.task
 import std_msgs.msg
 import std_srvs.srv
 from arena_people_msgs.msg import Pedestrian, SpawnPedestrian
@@ -28,7 +30,7 @@ from arena_people_msgs.srv import (
     UpdatePedestrians,
 )
 from arena_rclpy_mixins import ArenaMixinNode
-from arena_rclpy_mixins.Async import ClientWrapper
+from arena_rclpy_mixins.Async import AsyncUtil, ClientWrapper
 from arena_rclpy_mixins.shared import Namespace
 from arena_rclpy_mixins.Time import Time
 from arena_simulation_setup.shared import Light as LightDefinition
@@ -50,6 +52,7 @@ from isaacsim_msgs.srv import (
     EditPrims,
     ResetWorld,
     SetLights,
+    SetMapOffset,
     SpawnCeilings,
     SpawnFloors,
     SpawnLights,
@@ -83,7 +86,7 @@ from arena_runtime.sim._control import (
 )
 from arena_runtime.sim._interface import offset_pose, resolve_obstacle_box
 from arena_runtime.sim._urdf import transform_urdf_for_bridge
-from arena_runtime.sim._walls import realize_renderable
+from arena_runtime.sim._walls import realize_renderable, sloped_box
 
 """
 IsaacHost is constructed once by arena_node and owns process-singleton resources for Isaac: the lifecycle (pause/unpause/cleanup) and the pause/unpause/delete service clients.
@@ -94,6 +97,8 @@ IsaacSimulator is per-env on task_generator_node and adapts env-namespace state 
 # matches World(physics_dt=rendering_dt=1/60) pinned in run_isaacsim.py
 _ISAAC_PHYSICS_HZ = 60.0
 _ISAAC_EXPOSURE_GAIN = 5.0
+_TILT_EPS = 1e-9
+_MAP_OFFSET_TIMEOUT_S = 10.0
 
 
 class IsaacHost(SimLifecycle):
@@ -163,8 +168,28 @@ def material_to_msg(material: arena_simulation_setup.tree.assets.Material.Materi
     )
 
 
+def _vector3(values: tuple[float, float, float]) -> geometry_msgs.msg.Vector3:
+    x, y, z = values
+    return geometry_msgs.msg.Vector3(x=float(x), y=float(y), z=float(z))
+
+
+def _box_wall(name: str, size: tuple[float, float, float], pose: Pose) -> Wall:
+    """Wall message of a box of `size` at a simulator-frame pose, yawed only, a tilt goes through EditPrims."""
+    sx, sy, sz = size
+    yaw = pose.orientation.to_yaw()
+    cx, cy, cz = pose.position.x, pose.position.y, pose.position.z
+    half = sx / 2.0
+    return Wall(
+        name=name,
+        start=geometry_msgs.msg.Point(x=cx - half * math.cos(yaw), y=cy - half * math.sin(yaw), z=cz - sz / 2.0),
+        end=geometry_msgs.msg.Point(x=cx + half * math.cos(yaw), y=cy + half * math.sin(yaw), z=cz + sz / 2.0),
+        thickness=sy,
+    )
+
+
 class IsaacSimulator(BaseSim, NodeInterface):
     SIM_NAME = 'isaac'
+    STACKS_LEVELS = True
 
     def __init__(self, **kwargs: typing.Unpack[SimKwargs]) -> None:
         """Initialize IsaacSimulator"""
@@ -188,6 +213,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
             MovePedestrians=self.node.create_client_wrapper(MovePedestrians, "/isaac/MovePedestrians"),
             ResetWorld=self.node.create_client_wrapper(ResetWorld, "/isaac/ResetWorld"),
             SetLights=self.node.create_client_wrapper(SetLights, "/isaac/SetLights"),
+            SetMapOffset=self.node.create_client_wrapper(SetMapOffset, "/isaac/SetMapOffset"),
             UpdatePedestrians=self.node.create_client_wrapper(UpdatePedestrians, "/isaac/UpdatePedestrians"),
             SpawnCeilings=self.node.create_client_wrapper(SpawnCeilings, "/isaac/SpawnCeilings"),
             SpawnFloors=self.node.create_client_wrapper(SpawnFloors, "/isaac/SpawnFloors"),
@@ -200,6 +226,8 @@ class IsaacSimulator(BaseSim, NodeInterface):
         self._peds_publisher = self.node.create_publisher(arena_people_msgs.msg.Pedestrians, "/isaac/arena_peds", 10)
 
         self._robot_prims: dict[str, str] = {}
+        self._map_offsets: dict[str, tuple[float, float, float]] = {}
+        self._map_offset_calls: dict[str, rclpy.task.Future] = {}
         self._shared_lights: set[str] = set()
 
     def _robot_loader_args(self, robot: Robot) -> dict[str, object]:
@@ -253,7 +281,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
                             tf_prefix=robot.frame.tf(),
                             base_frame=robot_params.base_frame,
                             odom_frame=robot_params.odom_frame,
-                            pose=robot.pose.to_msg(),
+                            pose=self._placed(robot.pose).to_msg(),
                             cmd_vel_topic=self.node.service_namespace(robot.name, 'cmd_vel'),
                             joint_states_topic=self.node.service_namespace(robot.name, 'joint_states'),
                             odom_topic='' if relays_odom else self.node.service_namespace(robot.name, 'odom'),
@@ -285,6 +313,11 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
                     self._register_agent_robot(robot, robot_params)
                     self._robot_prims[robot.sim_path] = fq_name
+                    self._map_offsets[robot.sim_path] = (0.0, 0.0, 0.0)
+                    self._map_offset_calls.pop(robot.sim_path, None)
+                    self._track_level(robot.sim_path, robot.pose)
+                    if (call := self._map_offset_calls.get(robot.sim_path)) is not None and await AsyncUtil.timeout(self.node.await_ros(call), timeout_sec=_MAP_OFFSET_TIMEOUT_S) is None:
+                        self._logger.warning(f"SetMapOffset for {fq_name!r} timed out, its map -> odom is stale")
                     return True
 
                 # TODO
@@ -397,7 +430,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
             prim = Prim()
             prim.usd_path = str(model.path)
             prim.name = self._NS_PRIM(obstacle.name)
-            prim.pose = obstacle.pose.to_msg()
+            prim.pose = self._placed(obstacle.pose).to_msg()
             if obstacle.scale is not None:
                 prim.scale.x = obstacle.scale.x
                 prim.scale.y = obstacle.scale.y
@@ -442,7 +475,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
             pedestrians=[
                 Pedestrian(
                     name=p.sim_path,
-                    pose=p.pose.to_msg(),
+                    pose=self._placed(p.pose).to_msg(),
                 )
                 for p in pedestrians
             ]
@@ -455,7 +488,10 @@ class IsaacSimulator(BaseSim, NodeInterface):
     async def robot_move(self, robots: Sequence[Robot]) -> Sequence[bool]:
         async def move_robot(robot: Robot) -> bool:
             try:
-                return await self._move_entity(self._NS_ROBOT(robot.name), robot.pose)
+                if not await self._move_entity(self._NS_ROBOT(robot.name), robot.pose):
+                    return False
+                self._track_level(robot.sim_path, robot.pose)
+                return True
             except Exception as e:
                 self._logger.error(f"Failed to move robot {robot.name}: {e}\n{traceback.format_exc()}")
                 return False
@@ -475,6 +511,8 @@ class IsaacSimulator(BaseSim, NodeInterface):
         for robot in robots:
             self._forget_agent_robot(robot.sim_path)
             self._robot_prims.pop(robot.sim_path, None)
+            self._map_offsets.pop(robot.sim_path, None)
+            self._map_offset_calls.pop(robot.sim_path, None)
         return await asyncio.gather(*(self._delete_entity(self._NS_ROBOT(r.name)) for r in robots))
 
     async def remove_world(self) -> bool:
@@ -485,22 +523,26 @@ class IsaacSimulator(BaseSim, NodeInterface):
         if clear_existing:
             await self.remove_world()
         self._logger.debug("Attempting to spawn walls")
+        tilted: list[Prim] = []
 
-        async def create_segment(segment: WallSegment) -> Wall | None:
-            end = segment.end.to_msg()
-            end.z += segment.height
+        async def create_segment(segment: WallSegment, shift: tuple[float, float, float]) -> Wall | None:
+            dx, dy, dz = shift
+            start = Position(segment.start.x + dx, segment.start.y + dy, segment.start.z + dz)
+            end = Position(segment.end.x + dx, segment.end.y + dy, segment.end.z + dz + segment.height)
             try:
-                wall_name = self._realizer.realize(f"wall_{next(self.wall_counter)}")
-                return Wall(
-                    name=self._NS_WALL(wall_name),
-                    start=segment.start.to_msg(),
-                    end=end,
-                    material=material_to_msg(await segment.material.resolve()),
-                    thickness=segment.width,
-                    visible=segment.visible,
-                    solid=segment.solid,
-                    shadows=segment.shadows,
-                )
+                wall_name = self._NS_WALL(self._realizer.realize(f"wall_{next(self.wall_counter)}"))
+                if (sloped := sloped_box(segment)) is not None:
+                    size, pose = sloped
+                    placed = Pose(position=Position(pose.position.x + dx, pose.position.y + dy, pose.position.z + dz), orientation=pose.orientation)
+                    wall = _box_wall(wall_name, size, placed)
+                    tilted.append(Prim(name=wall_name, pose=placed.to_msg()))
+                else:
+                    wall = Wall(name=wall_name, start=start.to_msg(), end=end.to_msg(), thickness=segment.width)
+                wall.material = material_to_msg(await segment.material.resolve())
+                wall.visible = segment.visible
+                wall.solid = segment.solid
+                wall.shadows = segment.shadows
+                return wall
 
             except Exception as e:
                 self._logger.error(f"Failed to spawn wall: {e}\n{traceback.format_exc()}")
@@ -514,7 +556,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
                 prim = Prim()
                 prim.usd_path = str(model.path)
                 prim.name = self._NS_WALL(prim_name)
-                prim.pose = obstacle.pose.to_msg()
+                prim.pose = self._placed(obstacle.pose).to_msg()
                 return prim
 
             except Exception as e:
@@ -523,7 +565,8 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
         async def create_wall(wall: WallDefinition) -> tuple[typing.Iterator[object], typing.Iterator[object]]:
             segments, obstacles = await realize_renderable(wall, (ModelType.USD,))
-            return map(create_segment, segments), map(create_obstacle, obstacles)
+            shift = self._shift((wall.start.x + wall.end.x) / 2.0, (wall.start.y + wall.end.y) / 2.0)
+            return (create_segment(segment, shift) for segment in segments), map(create_obstacle, obstacles)
 
         wall_futures = await asyncio.gather(*map(create_wall, walls))
         segment_futures, obstacle_futures = zip(*wall_futures, strict=False) if wall_futures else ((), ())
@@ -536,6 +579,9 @@ class IsaacSimulator(BaseSim, NodeInterface):
         walls_res = await self._clients.SpawnWalls.call_timeout(walls_req)
         prims_res = await self._clients.SpawnPrims.call_timeout(prims_req)
         res = bool(walls_res) and all(walls_res.ret) and bool(prims_res) and all(prims_res.ret)
+        if tilted:
+            edit = await self._clients.EditPrims.call_timeout(EditPrims.Request(prims=tilted, pose=True))
+            res = res and bool(edit) and all(edit.ret)
 
         self._logger.debug("All walls spawned.")
         return res
@@ -549,7 +595,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
                     name=self._NS_FLOOR(floor.name),
                     x_length=floor.x_length,
                     y_length=floor.y_length,
-                    pos=floor.pos.to_msg(),
+                    pos=self._realizer.placement().place(floor.pos).to_msg(),
                     material=material_to_msg(await floor.material.resolve()),
                 )
 
@@ -570,13 +616,12 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
         async def impl(ceiling: CeilingDefinition) -> Ceiling | None:
             try:
-                pos = ceiling.pos.to_msg()
-                pos.z = ceiling.z
+                pos = self._realizer.placement().place(Position(ceiling.pos.x, ceiling.pos.y, ceiling.z))
                 return Ceiling(
                     name=self._NS_CEILING(ceiling.name),
                     x_length=ceiling.x_length,
                     y_length=ceiling.y_length,
-                    pos=pos,
+                    pos=pos.to_msg(),
                     cast_shadows=ceiling.cast_shadows,
                     material=material_to_msg(await ceiling.material.resolve()),
                 )
@@ -600,6 +645,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
     def _light_msg(self, light: LightDefinition) -> Light:
         spec = light.spec
+        placement = self._realizer.placement()
         if spec.shape == 'dome':
             assert light.lux is not None
             intensity = light.lux / math.pi
@@ -618,7 +664,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
             y_length=spec.y_length,
             radius=spec.radius,
             cone_deg=spec.cone_deg,
-            positions=[position.to_msg() for position in (light.fixtures if light.rig else [light.position])],
+            positions=[placement.place(position).to_msg() for position in (light.fixtures if light.rig else [light.position])],
             direction=geometry_msgs.msg.Vector3(x=light.direction[0], y=light.direction[1], z=light.direction[2]),
             intensity=_ISAAC_EXPOSURE_GAIN * intensity,
             cct_k=light.cct_K,
@@ -647,7 +693,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
         return bool(res) and all(res.ret)
 
     async def _move_light(self, light: LightDefinition, position: Position, yaw: float) -> None:
-        state = LightState(name=self._light_name(light), move=True, position=position.to_msg(), yaw=yaw)
+        state = LightState(name=self._light_name(light), move=True, position=self._realizer.placement().place(position).to_msg(), yaw=yaw)
         res = await self._clients.SetLights.call_timeout(SetLights.Request(states=[state]))
         if res is None or not all(res.ret):
             raise RuntimeError(f"light {light.name!r} did not move")
@@ -658,40 +704,55 @@ class IsaacSimulator(BaseSim, NodeInterface):
         if res is None or not all(res.ret):
             raise RuntimeError(f"light {light.name!r} did not take its state")
 
-    async def spawn_box(self, name: str, size: tuple[float, float, float], pose: Pose, material: arena_simulation_setup.tree.assets.Material.MaterialIdentifier | None = None) -> bool:
-        """Spawn an axis-aligned box using the SpawnWalls service.
+    async def spawn_box(
+        self,
+        name: str,
+        size: tuple[float, float, float],
+        pose: Pose,
+        material: arena_simulation_setup.tree.assets.Material.MaterialIdentifier | None = None,
+        *,
+        velocity: tuple[float, float, float] | None = None,
+        comb: bool = False,
+    ) -> bool:
+        """Spawn a box using the SpawnWalls service.
 
         SpawnWalls creates a cube via create_cube(scale=(length, thickness, height)).
         Encoding: the AB vector carries sx (length) and yaw; thickness carries sy; the z
         extent of the start/end points carries sz. This lets a single Wall message
-        fully describe a box without a dedicated service call.
+        fully describe a yawed box, a tilted one takes its full orientation from EditPrims.
         """
-        sx, sy, sz = size
-        yaw = pose.orientation.to_yaw()
-        cx, cy, cz = pose.position.x, pose.position.y, pose.position.z
-        half = sx / 2.0
-        start_x = cx - half * math.cos(yaw)
-        start_y = cy - half * math.sin(yaw)
-        end_x = cx + half * math.cos(yaw)
-        end_y = cy + half * math.sin(yaw)
-        wall = Wall(
-            name=name,
-            start=geometry_msgs.msg.Point(x=start_x, y=start_y, z=cz - sz / 2.0),
-            end=geometry_msgs.msg.Point(x=end_x, y=end_y, z=cz + sz / 2.0),
-            thickness=sy,
-        )
+        del comb
+        pose = self._placed(pose)
+        wall = _box_wall(name, size, pose)
+        wall.velocity = _vector3(velocity or (0.0, 0.0, 0.0))
         if material is not None:
             wall.material = material_to_msg(await material.resolve())
         req = SpawnWalls.Request()
         req.walls = [wall]
         res = await self._clients.SpawnWalls.call_timeout(req)
-        return bool(res) and bool(res.ret) and res.ret[0]
+        if not (bool(res) and bool(res.ret) and res.ret[0]):
+            return False
+        roll, pitch, _ = pose.orientation.to_euler()
+        if max(abs(roll), abs(pitch)) <= _TILT_EPS:
+            return True
+        edit = await self._clients.EditPrims.call_timeout(EditPrims.Request(prims=[Prim(name=name, pose=pose.to_msg())], pose=True))
+        return bool(edit) and all(edit.ret)
 
     async def move_box(self, name: str, pose: Pose) -> bool:
         # Fire-and-forget: animation is cosmetic, last-write-wins, don't gate tick rate on bridge latency.
-        req = EditPrims.Request(prims=[Prim(name=name, pose=pose.to_msg())], pose=True)
+        req = EditPrims.Request(prims=[Prim(name=name, pose=self._placed(pose).to_msg())], pose=True)
         self._clients.EditPrims.client.call_async(req)
         return True
+
+    async def move_boxes(self, poses: Mapping[str, Pose]) -> bool:
+        req = EditPrims.Request(prims=[Prim(name=name, pose=self._placed(pose).to_msg()) for name, pose in poses.items()], pose=True)
+        self._clients.EditPrims.client.call_async(req)
+        return True
+
+    async def set_box_velocities(self, velocities: Mapping[str, tuple[float, float, float]]) -> bool:
+        req = EditPrims.Request(prims=[Prim(name=name, velocity=_vector3(velocity)) for name, velocity in velocities.items()], velocity=True)
+        res = await self._clients.EditPrims.call_timeout(req)
+        return bool(res) and all(res.ret)
 
     async def delete_box(self, name: str) -> bool:
         return await self._delete_entity(name)
@@ -700,7 +761,10 @@ class IsaacSimulator(BaseSim, NodeInterface):
         prim_name = self._robot_prims.get(sim_path)
         if prim_name is None:
             return False
-        return await self._move_entity(prim_name, pose)
+        if not await self._move_entity(prim_name, pose):
+            return False
+        self._track_level(sim_path, pose)
+        return True
 
     async def step(self, n: int = 1) -> bool:
         """Unused wall-clock fake, superseded by SimLifecycle.step_seconds."""
@@ -724,7 +788,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
             SpawnPedestrian(
                 pedestrian=Pedestrian(
                     name=pedestrian.sim_path,
-                    pose=pedestrian.pose.to_msg(),
+                    pose=self._placed(pedestrian.pose).to_msg(),
                     model_uri=uri,
                 ),
                 model_ref=pedestrian.model.name,
@@ -757,8 +821,30 @@ class IsaacSimulator(BaseSim, NodeInterface):
     async def pedestrian_update(self, pedestrians: arena_people_msgs.msg.Pedestrians) -> Sequence[bool]:
         # Published ped names are already sim_paths, matching the spawn key.
         # Latest-wins state stream rides the topic, mirroring gazebo's contract.
+        if self._realizer.placement().stacked:
+            pedestrians = copy.deepcopy(pedestrians)
+            for ped in pedestrians.pedestrians:
+                ped.pose = self._placed(Pose.from_msg(ped.pose)).to_msg()
         self._peds_publisher.publish(pedestrians)
         return tuple(True for _ in pedestrians.pedestrians)
+
+    def _publish_odom(self, sim_path: str) -> None:
+        """Send the robot's map -> odom, the inverse shift of its level, to its odom graph when it changed, so the map frame stays abstract."""
+        name = self._robot_prims.get(sim_path)
+        if name is None:
+            return
+        dx, dy, dz = self._robot_shift(sim_path)
+        translation = (-dx, -dy, -dz)
+        if self._map_offsets.get(sim_path) == translation:
+            return
+        self._map_offsets[sim_path] = translation
+        call = self._clients.SetMapOffset.client.call_async(SetMapOffset.Request(name=name, translation=_vector3(translation)))
+        call.add_done_callback(lambda done: self._map_offset_done(name, done))
+        self._map_offset_calls[sim_path] = call
+
+    def _map_offset_done(self, name: str, call: rclpy.task.Future) -> None:
+        if call.cancelled() or call.exception() is not None or not call.result().success:
+            self._logger.warning(f"SetMapOffset failed for {name!r}, its map -> odom is stale")
 
     async def _delete_entity(self, name: str) -> bool:
         self._logger.debug(f"Attempting to delete prim {name}")
@@ -777,7 +863,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
             prims=[
                 Prim(
                     name=name,
-                    pose=pose.to_msg(),
+                    pose=self._placed(pose).to_msg(),
                 )
                 for name, pose in actions
             ],

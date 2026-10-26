@@ -1,4 +1,4 @@
-"""Elevator cabins as teleport zones, door states as zone access and teleports the arena_humansim bridge hands to the engine."""
+"""Elevator cabins and stair halves as teleport zones, door states as zone access and teleports the arena_humansim bridge hands to the engine."""
 
 from __future__ import annotations
 
@@ -13,11 +13,13 @@ import pytest
 pytest.importorskip("rclpy")
 
 from arena_humansim_msgs.srv import NotifyStimulus, SetTeleportZones, SetZoneAccess, TeleportAgents
-from arena_simulation_setup.shared import Elevator
+from arena_simulation_setup.shared import Elevator, Stairs
+from arena_simulation_setup.shared.world import STAIRS_SEAM_INSET
 from arena_simulation_setup.tree.World.model import Level, World
 from arena_simulation_setup.tree.World.view import _ring_free_cabins
 from arena_simulation_setup.utils.geometry import Position
 from task_generator.manager.realizer import Realizer
+from task_generator.simulators.human import stair_height, stair_running
 from task_generator.simulators.human.arena_humansim.arena_humansim import ArenaHumanSimulator
 
 ENV_OFFSET = (100.0, 50.0)
@@ -90,6 +92,7 @@ class _Engine:
 
     def __init__(self, node: typing.Any) -> None:
         self.zones: list[list[str]] = []
+        self.requests: list[SetTeleportZones.Request] = []
         self.access: list[dict[str, bool]] = []
         self.teleports: list[TeleportAgents.Request] = []
         self.stimuli: list[tuple[int, str, float]] = []
@@ -100,6 +103,7 @@ class _Engine:
 
     def _set_zones(self, request: SetTeleportZones.Request, response: SetTeleportZones.Response) -> SetTeleportZones.Response:
         self.zones.append([zone.name for zone in request.zones])
+        self.requests.append(request)
         response.success = True
         return response
 
@@ -207,5 +211,104 @@ def test_door_changes_reach_the_engine_by_cabin_name() -> None:
         await bridge.elevator_doors_changed({"env_0/0/lift_0": True, "env_0/1/lift_1": False})
 
         assert engine.access == [{"env_0/0/lift_0": True, "env_0/1/lift_1": False}]
+
+    _on_bridge(body)
+
+
+def _escalator(realizer: Realizer) -> tuple[Stairs, Stairs]:
+    """An up escalator from level 0 to level 1, realized: the boarding half and its exit half."""
+    realizer.reset_stair_levels({"esc_up_low": "0", "esc_up_high": "1"})
+    low = Stairs(name="esc_up_low", position=Position(10.3, 5.0), kind="escalator", size=[2.6, 1.0], mouth_side="-x", to="esc_up_high")
+    high = Stairs(name="esc_up_high", position=Position(3.7, 5.0), kind="escalator", size=[2.6, 1.0], mouth_side="+x", top=True)
+    return realizer.realize(low, "0"), realizer.realize(high, "1")
+
+
+def _stair_adapter(realizer: Realizer, stairs: tuple[Stairs, ...], running: dict[str, bool]) -> ArenaHumanSimulator:
+    adapter = _adapter(realizer)
+    adapter._known_stairs = stairs
+    adapter._stair_running = running
+    return adapter
+
+
+def test_stair_half_goes_to_the_engine_walked_from_the_mouth_to_the_seam() -> None:
+    realizer = _realizer()
+    low, high = _escalator(realizer)
+    adapter = _stair_adapter(realizer, (low, high), {})
+    board, exit_half = adapter._stair_zone_msg(low), adapter._stair_zone_msg(high)
+
+    assert (board.name, list(board.destinations), board.kind) == (realizer.prefix("esc_up_low", "0"), [realizer.prefix("esc_up_high", "1")], "escalator")
+    assert (board.entry.x, board.entry.y, board.entry.theta) == pytest.approx((9.0, 5.0, 0.0))
+    assert (board.hold.x, board.hold.y) == pytest.approx((9.0 + 2.6 - STAIRS_SEAM_INSET, 5.0))
+    assert [c for p in board.footprint for c in (p.x, p.y)] == pytest.approx([9.0, 4.5, 11.6, 4.5, 11.6, 5.5, 9.0, 5.5])
+    assert (board.open, board.belt) == (True, pytest.approx(0.5))
+    assert (list(exit_half.destinations), exit_half.open, exit_half.belt) == ([], True, pytest.approx(-0.5))
+    assert (exit_half.entry.x, exit_half.entry.y) == pytest.approx((35.0, 5.0))
+
+
+def test_half_whose_partner_level_is_not_loaded_has_no_destination() -> None:
+    realizer = _realizer()
+    low, _high = _escalator(realizer)
+    msg = _stair_adapter(realizer, (low,), {})._stair_zone_msg(low)
+
+    assert (list(msg.destinations), msg.open) == ([], True)
+
+
+@pytest.mark.parametrize("stopped", ["esc_up_low", "esc_up_high"])
+def test_stopped_escalator_stills_both_halves_and_closes_its_boarding_half(stopped: str) -> None:
+    realizer = _realizer()
+    low, high = _escalator(realizer)
+    adapter = _stair_adapter(realizer, (low, high), {realizer.prefix(stopped, "0" if stopped == "esc_up_low" else "1"): False})
+    board, exit_half = adapter._stair_zone_msg(low), adapter._stair_zone_msg(high)
+
+    assert (board.open, board.belt) == (False, 0.0)
+    assert (exit_half.open, exit_half.belt) == (True, 0.0)
+
+
+def test_stairs_are_open_and_still_whatever_is_reported() -> None:
+    realizer = _realizer()
+    realizer.reset_stair_levels({"up": "0", "down": "1"})
+    up = realizer.realize(Stairs(name="up", position=Position(10.3, 2.0), mouth_side="-x", to="down"), "0")
+    down = realizer.realize(Stairs(name="down", position=Position(3.7, 2.0), mouth_side="+x", to="up", top=True), "1")
+    for running in ({}, {up.name: True}):
+        msgs = [_stair_adapter(realizer, (up, down), running)._stair_zone_msg(stair) for stair in (up, down)]
+        assert [(m.kind, m.open, m.belt, list(m.destinations)) for m in msgs] == [("stairs", True, 0.0, [down.name]), ("stairs", True, 0.0, [up.name])]
+
+
+def test_stair_running_follows_both_halves_of_an_escalator() -> None:
+    low, high = _escalator(_realizer())
+    other = Stairs(name="other", position=Position(0.0, 0.0), kind="escalator")
+    assert stair_running(low, (low, high, other), {}) is True
+    assert stair_running(low, (low, high, other), {high.name: False}) is False
+    assert stair_running(high, (low, high, other), {low.name: False}) is False
+    assert stair_running(high, (low, high, other), {low.name: True, "other": False}) is True
+
+
+def test_pedestrian_height_follows_the_half_it_stands_on() -> None:
+    low, high = _escalator(_realizer())
+    assert stair_height((low, high), 109.0 + 0.5, 55.0) == 0.0
+    assert stair_height((low, high), 109.0 + 1.3, 55.0) == pytest.approx(1.5 * 0.5 / 1.8)
+    assert stair_height((low, high), 109.0 + 2.6, 55.2) == pytest.approx(1.5)
+    assert stair_height((low, high), 135.0 - 1.3, 55.0) == pytest.approx(-1.5 * 0.5 / 1.8)
+    assert stair_height((low, high), 120.0, 55.0) == 0.0
+    assert stair_height((low, high), 110.3, 56.0) == 0.0
+
+
+def test_escalator_running_changes_resend_every_zone() -> None:
+    from task_generator.simulators.human.utils import ObstacleLayer
+
+    async def body(bridge: ArenaHumanSimulator, engine: _Engine) -> None:
+        low, high = _escalator(bridge._realizer)
+        bridge.spawn_stairs([low, high])
+        assert await bridge.spawn_elevators([])
+        await bridge.stairs_changed({low.name: False})
+        await bridge.stairs_changed({low.name: True})
+        await bridge.remove_obstacles(purge=ObstacleLayer.WORLD)
+
+        assert [[(zone.name, zone.open, round(zone.belt, 3)) for zone in request.zones] for request in engine.requests] == [
+            [(low.name, True, 0.5), (high.name, True, -0.5)],
+            [(low.name, False, 0.0), (high.name, True, 0.0)],
+            [(low.name, True, 0.5), (high.name, True, -0.5)],
+            [],
+        ]
 
     _on_bridge(body)

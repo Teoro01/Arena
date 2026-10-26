@@ -1,4 +1,4 @@
-"""Expand GoTo phases into elevator rides: explicit `via` elevators plus automatic cross-level routing."""
+"""Expand GoTo phases into elevator rides and stair crossings: explicit `via` hops plus automatic cross-level routing."""
 
 from __future__ import annotations
 
@@ -7,20 +7,21 @@ import typing
 
 import attrs
 
+from task_generator.manager.world_manager.world_manager import ElevatorHop
 from task_generator.shared import Orientation, Pose, Position
-from task_generator.tasks.robots.request import ElevatorLegPhase, ElevatorRidePhase, GoToPhase, LoopPhase
+from task_generator.tasks.robots.request import ElevatorLegPhase, ElevatorRidePhase, GoToPhase, LoopPhase, StairsLegPhase, StairsRidePhase
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
-    from task_generator.manager.world_manager.world_manager import ElevatorHop, ElevatorRide, WorldManager
+    from task_generator.manager.world_manager.world_manager import ElevatorRide, LevelHop, StairsRide, WorldManager
     from task_generator.tasks.robots.request import TaskPhase
 
 VIA_DESTINATION_SEP = '>'
 
 
 def parse_via(entry: str) -> tuple[str, str]:
-    """`"<elevator>"` or `"<elevator>><destination>"` -> (elevator, destination or '')."""
+    """`"<elevator or stair>"` or `"<elevator or stair>><destination>"` -> (name, destination or '')."""
     name, _, to = entry.partition(VIA_DESTINATION_SEP)
     return name.strip(), to.strip()
 
@@ -68,21 +69,62 @@ def ride_phases(ride: ElevatorRide, orientation: Orientation, goal_tolerance: fl
     return phases
 
 
+STAIRS_ALIGN_TOLERANCE = 0.3
+STAIRS_APPROACH_TOLERANCE = 0.25
+
+
+def crossing_tolerance(overshoot: float) -> float:
+    """Crossing tolerance, half the overshoot past the trigger line so a planner stopping within it has crossed."""
+    return overshoot / 2.0
+
+
+def crossing_phases(ride: StairsRide, goal_tolerance: float) -> list[GoToPhase]:
+    """Axis-aligned approach leg, the drive past the trigger line completing on the partner half, and an exit leg out of the partner's mouth."""
+    hop = ride.hop
+    board = Orientation.from_yaw(ride.board_yaw)
+    return [
+        StairsLegPhase(pose=Pose(position=ride.approach, orientation=board), tolerance_radius=min(goal_tolerance, STAIRS_APPROACH_TOLERANCE), tolerance_angle=STAIRS_ALIGN_TOLERANCE, hold_time=0.0),
+        StairsRidePhase(
+            pose=Pose(position=ride.board_target, orientation=board),
+            target=hop.dest_name,
+            tolerance_radius=crossing_tolerance(ride.overshoot),
+            tolerance_angle=math.pi,
+            hold_time=0.0,
+        ),
+        StairsLegPhase(pose=Pose(position=ride.dest_exit, orientation=Orientation.from_yaw(ride.exit_yaw)), tolerance_radius=exit_tolerance(ride.mouth_standoff), tolerance_angle=math.pi, hold_time=0.0),
+    ]
+
+
 def _via_toward(world_manager: WorldManager, vias: Sequence[str], index: int, goal: Position) -> Position:
-    """Where the robot heads after ride `index`: the next via boarding cabin, else the goal."""
+    """Where the robot heads after hop `index`: the next via boarding point, else the goal."""
     if index + 1 < len(vias):
-        position = world_manager.elevator_position(parse_via(vias[index + 1])[0])
+        position = world_manager.via_position(parse_via(vias[index + 1])[0])
         if position is not None:
             return position
     return goal
 
 
-def route_phases(phases: Sequence[TaskPhase], start: Position | None, world_manager: WorldManager, *, robot_radius: float, goal_tolerance: float) -> list[TaskPhase]:
-    """Insert elevator rides for a robot disc of `robot_radius` before GoTo phases in the abstract frame: explicit `via` rides, then the BFS route to the goal level."""
+def route_phases(
+    phases: Sequence[TaskPhase],
+    start: Position | None,
+    world_manager: WorldManager,
+    *,
+    robot_radius: float,
+    goal_tolerance: float,
+    climbs: Collection[str] = (),
+) -> list[TaskPhase]:
+    """Insert elevator rides and crossings of the stair kinds in `climbs` for a robot disc of `robot_radius` before GoTo phases in the abstract frame: explicit `via` hops, then the fewest-hop route to the goal level."""
     current_level = world_manager.level_of_point(start.x, start.y) if start is not None else ""
+    climbed = frozenset(climbs)
 
-    def rides(hops: Sequence[ElevatorHop], orientation: Orientation) -> list[GoToPhase]:
-        return [p for hop in hops for p in ride_phases(world_manager.elevator_ride(hop, robot_radius), orientation, goal_tolerance)]
+    def rides(hops: Sequence[LevelHop], orientation: Orientation) -> list[GoToPhase]:
+        routed: list[GoToPhase] = []
+        for hop in hops:
+            if isinstance(hop, ElevatorHop):
+                routed.extend(ride_phases(world_manager.elevator_ride(hop, robot_radius), orientation, goal_tolerance))
+            else:
+                routed.extend(crossing_phases(world_manager.stair_ride(hop, robot_radius), goal_tolerance))
+        return routed
 
     def route(phases: Sequence[TaskPhase]) -> list[TaskPhase]:
         nonlocal current_level
@@ -91,21 +133,21 @@ def route_phases(phases: Sequence[TaskPhase], start: Position | None, world_mana
             if isinstance(phase, LoopPhase):
                 routed.append(attrs.evolve(phase, phases=route(phase.phases)))
                 continue
-            if not isinstance(phase, GoToPhase) or isinstance(phase, (ElevatorRidePhase, ElevatorLegPhase)) or phase.pose is None:
+            if not isinstance(phase, GoToPhase) or isinstance(phase, (ElevatorRidePhase, ElevatorLegPhase, StairsRidePhase, StairsLegPhase)) or phase.pose is None:
                 routed.append(phase)
                 continue
             goal = phase.pose.position
             orientation = phase.pose.orientation
             for index, entry in enumerate(phase.via):
                 name, to = parse_via(entry)
-                hop = world_manager.elevator_hop(name, to=to, toward=_via_toward(world_manager, phase.via, index, goal))
+                hop = world_manager.via_hop(name, to=to, toward=_via_toward(world_manager, phase.via, index, goal), climbs=climbed)
                 if current_level and hop.board_level != current_level:
-                    routed.extend(rides(world_manager.elevator_hops(current_level, hop.board_level), orientation))
+                    routed.extend(rides(world_manager.level_hops(current_level, hop.board_level, climbed), orientation))
                 routed.extend(rides([hop], orientation))
                 current_level = hop.dest_level
             goal_level = world_manager.level_of_point(goal.x, goal.y)
             if current_level and goal_level and goal_level != current_level:
-                routed.extend(rides(world_manager.elevator_hops(current_level, goal_level), orientation))
+                routed.extend(rides(world_manager.level_hops(current_level, goal_level, climbed), orientation))
             if goal_level:
                 current_level = goal_level
             routed.append(attrs.evolve(phase, via=()) if phase.via else phase)

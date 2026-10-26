@@ -105,7 +105,7 @@ class Sample:
 
 
 def zone_polygons(level: Level) -> dict[str, shapely.Polygon]:
-    """Zone, door and elevator polygons of a compacted level, keyed by name."""
+    """Zone, door, elevator and stair polygons of a compacted level, keyed by name."""
     import shapely
 
     polygons: dict[str, shapely.Polygon] = {}
@@ -114,6 +114,11 @@ def zone_polygons(level: Level) -> dict[str, shapely.Polygon]:
         if corners is None or len(corners) < 3:
             continue
         polygons[name] = shapely.Polygon([(c.x, c.y) for c in corners])
+    groups: dict[str, list[shapely.Polygon]] = {}
+    for stair in level.stairs:
+        if stair.group:
+            groups.setdefault(stair.group, []).append(polygons[stair.name])
+    polygons.update((name, shapely.unary_union(halves)) for name, halves in groups.items())
     return polygons
 
 

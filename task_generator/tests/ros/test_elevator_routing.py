@@ -1,4 +1,4 @@
-"""Elevator rides for robots: WorldManager hops, `via` expansion, ride phases, start-level frame."""
+"""Elevator rides and stair crossings for robots: WorldManager hops, `via` expansion, ride phases, start-level frame."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 
 try:
     from arena_rclpy_mixins.Time import Time
-    from arena_simulation_setup.shared import Elevator
+    from arena_simulation_setup.shared import Elevator, Stairs
     from arena_simulation_setup.shared.judge import PhaseMonitor, Sample, zone_polygons
     from arena_simulation_setup.shared.task import TaskPhase
     from arena_simulation_setup.tree.World.Scenario import RobotGoal
@@ -18,12 +18,12 @@ try:
     from arena_simulation_setup.utils.geometry import Orientation, Pose
     from arena_simulation_setup.utils.geometry import Position as GeoPosition
 
-    from task_generator.manager.robot_manager.elevator_routing import MIN_RIDE_TOLERANCE, parse_via, ride_phase, route_phases
+    from task_generator.manager.robot_manager.elevator_routing import STAIRS_ALIGN_TOLERANCE, STAIRS_APPROACH_TOLERANCE, MIN_RIDE_TOLERANCE, parse_via, ride_phase, route_phases
     from task_generator.manager.robot_manager.task_runner import TaskRunner
     from task_generator.manager.world_manager.utils import WorldLayers, WorldMap, WorldOccupancy
     from task_generator.manager.world_manager.world_manager import WorldManager
     from task_generator.shared import Position
-    from task_generator.tasks.robots.request import ElevatorLegPhase, ElevatorRidePhase, GoToPhase, PlayGesturePhase, TaskRequest
+    from task_generator.tasks.robots.request import ElevatorLegPhase, ElevatorRidePhase, StairsLegPhase, StairsRidePhase, GoToPhase, PlayGesturePhase, TaskRequest
 except ImportError:
     pytestmark = pytest.mark.skip(reason="ROS2 not available")
 
@@ -93,7 +93,7 @@ def _pose(x: float, y: float) -> Pose:
 
 def test_same_level_pair_has_no_bfs_route_but_explicit_hop():
     wm = _open_world()
-    assert wm.elevator_hops("0", "0") == []
+    assert wm.level_hops("0", "0") == []
     hop = wm.elevator_hop("elevator_ground")
     assert (hop.board_name, hop.dest_name) == ("elevator_ground", "elevator_top")
     assert (hop.board_position.x, hop.board_position.y) == (31.0, 5.0)
@@ -104,7 +104,7 @@ def test_same_level_pair_has_no_bfs_route_but_explicit_hop():
 
 def test_cross_level_route_applies_level_origins():
     wm = _two_storey()
-    hops = wm.elevator_hops("0", "1")
+    hops = wm.level_hops("0", "1")
     assert len(hops) == 1
     assert (hops[0].board_position.x, hops[0].board_position.y) == (5.0, 5.0)
     assert (hops[0].dest_position.x, hops[0].dest_position.y) == (56.0, 6.0)
@@ -149,9 +149,9 @@ def test_multi_destination_bfs_sets_target_only_when_ambiguous():
         },
         origins={"0": (0.0, 0.0), "1": (20.0, 0.0), "2": (40.0, 0.0)},
     )
-    (hop,) = wm.elevator_hops("0", "2")
+    (hop,) = wm.level_hops("0", "2")
     assert (hop.board_name, hop.dest_name, hop.target) == ("e0", "e2", "e2")
-    (back,) = wm.elevator_hops("2", "0")
+    (back,) = wm.level_hops("2", "0")
     assert back.target == ""
 
 
@@ -375,7 +375,7 @@ class _Logger:
         return lambda *a, **kw: None
 
 
-def _robot_manager(wm: WorldManager, env_offset: tuple[float, float] = (100.0, 0.0)):
+def _robot_manager(wm: WorldManager, env_offset: tuple[float, float] = (100.0, 0.0), climbs: tuple[str, ...] = ()):
     from task_generator.manager.robot_manager.robot_manager import RobotManager
     from task_generator.tasks.robots.request import TaskKind
 
@@ -423,6 +423,7 @@ def _robot_manager(wm: WorldManager, env_offset: tuple[float, float] = (100.0, 0
     rm._watchers = []
     rm._robot = SimpleNamespace(name="jackal")
     rm._robot_radius = 0.3
+    rm._climbs = frozenset(climbs)
     rm._pose = None
     return rm, adapter, writes
 
@@ -607,3 +608,202 @@ def test_ride_goal_sits_inside_cabin_beyond_goal_tolerance():
         ox, oy = {'+x': (1, 0), '-x': (-1, 0), '+y': (0, 1), '-y': (0, -1)}[side]
         stop = (target.x + ox * 1.0, target.y + oy * 1.0)
         assert abs(stop[0] - centre.x) < 1.0 and abs(stop[1] - centre.y) < 1.0
+
+
+# stair crossings
+
+_STAIRS = frozenset({"stairs"})
+_GO1 = {"robot_radius": 0.32, "goal_tolerance": 1.0}
+
+
+def _stair(name: str, x: float, y: float, mouth_side: str, to: str = "", kind: str = "stairs", top: bool = False) -> Stairs:
+    return Stairs(name=name, position=GeoPosition(x, y, 0.0), kind=kind, size=[2.6, 1.4 if kind == "stairs" else 1.0], mouth_side=mouth_side, to=to, top=top)
+
+
+def _stair_wm(levels: dict[str, list[Stairs]], elevators: dict[str, list[Elevator]] | None = None) -> WorldManager:
+    wm = _wm({lid: [_zone(f"floor_{lid}", 0, 0, 14, 10, (elevators or {}).get(lid))] for lid in levels}, origins={lid: (20.0 * i, 0.0) for i, lid in enumerate(levels)})
+    for lid, stairs in levels.items():
+        wm._world.levels[lid].stairs = list(stairs)
+    return wm
+
+
+def _stairs_demo(elevators: dict[str, list[Elevator]] | None = None) -> WorldManager:
+    """The stairs_demo layout: a stair pair, an up and a down escalator between two levels laid out 20 m apart."""
+    return _stair_wm(
+        {
+            "0": [
+                _stair("stairs_low", 10.3, 2.0, "-x", "stairs_high"),
+                _stair("esc_up_low", 10.3, 5.0, "-x", "esc_up_high", kind="escalator"),
+                _stair("esc_down_low", 10.3, 7.2, "-x", kind="escalator"),
+            ],
+            "1": [
+                _stair("stairs_high", 3.7, 2.0, "+x", "stairs_low", top=True),
+                _stair("esc_up_high", 3.7, 5.0, "+x", kind="escalator", top=True),
+                _stair("esc_down_high", 3.7, 7.2, "+x", "esc_down_low", kind="escalator", top=True),
+            ],
+        },
+        elevators,
+    )
+
+
+def _crossings(phases: list) -> list[str]:
+    return [p.target for p in phases if isinstance(p, StairsRidePhase) and p.until is None]
+
+
+def test_climber_crosses_the_stairs_to_a_goal_on_the_next_level():
+    wm = _stairs_demo()
+    goal = GoToPhase(pose=_pose(32.0, 8.0))
+    phases = route_phases([goal], Position(2.0, 2.0), wm, climbs=("stairs",), **_GO1)
+    assert [type(p) for p in phases] == [StairsLegPhase, StairsRidePhase, StairsLegPhase, GoToPhase]
+    approach, ride, exit_leg, last = phases
+    assert (approach.pose.position.x, approach.pose.position.y) == (pytest.approx(8.0), pytest.approx(2.0))
+    assert approach.pose.orientation.to_yaw() == pytest.approx(0.0)
+    assert approach.tolerance_radius == pytest.approx(0.25)
+    assert (ride.target, ride.until) == ("stairs_high", None)
+    assert (ride.pose.position.x, ride.pose.position.y) == (pytest.approx(9.0 + 2.6 - 0.32 - 0.05), pytest.approx(2.0))
+    assert ride.tolerance_radius == pytest.approx((0.8 - 0.32 - 0.05) / 2.0)
+    assert (exit_leg.pose.position.x, exit_leg.pose.position.y) == (pytest.approx(26.0), pytest.approx(2.0))
+    assert math.cos(exit_leg.pose.orientation.to_yaw()) == pytest.approx(1.0)
+    assert exit_leg.tolerance_radius == pytest.approx(0.9)
+    assert approach.hold_time == ride.hold_time == exit_leg.hold_time == 0.0
+    assert last == goal
+
+
+def test_stairs_run_both_ways():
+    wm = _stairs_demo()
+    phases = route_phases([GoToPhase(pose=_pose(2.0, 2.0))], Position(30.0, 2.0), wm, climbs=("stairs",), **_GO1)
+    approach, ride, exit_leg, _ = phases
+    assert _crossings(phases) == ["stairs_low"]
+    assert approach.pose.position.x == pytest.approx(26.0)
+    assert math.cos(approach.pose.orientation.to_yaw()) == pytest.approx(-1.0)
+    assert ride.pose.position.x == pytest.approx(25.0 - 2.6 + 0.32 + 0.05)
+    assert exit_leg.pose.position.x == pytest.approx(8.0)
+    assert math.cos(exit_leg.pose.orientation.to_yaw()) == pytest.approx(-1.0)
+
+
+def test_escalators_board_only_on_their_boarding_half():
+    wm = _stairs_demo()
+    up = route_phases([GoToPhase(pose=_pose(32.0, 8.0))], Position(2.0, 2.0), wm, climbs=("escalator",), **_GO1)
+    down = route_phases([GoToPhase(pose=_pose(2.0, 8.0))], Position(30.0, 8.0), wm, climbs=("escalator",), **_GO1)
+    assert _crossings(up) == ["esc_up_high"]
+    assert _crossings(down) == ["esc_down_low"]
+
+
+def test_robot_without_climbs_never_routes_through_stairs():
+    goal = GoToPhase(pose=_pose(32.0, 8.0))
+    assert route_phases([goal], Position(2.0, 2.0), _stairs_demo(), **_GO1) == [goal]
+    assert route_phases([goal], Position(2.0, 2.0), _stairs_demo(), climbs=("escalator",), **_GO1)[1].target == "esc_up_high"
+    wm = _stairs_demo({"0": [_elev("e0", 2.0, 8.0, "e1")], "1": [_elev("e1", 2.0, 8.0, "e0")]})
+    phases = route_phases([goal], Position(2.0, 2.0), wm, **_GO1)
+    assert [type(p) for p in phases] == [ElevatorLegPhase, ElevatorRidePhase, ElevatorLegPhase, GoToPhase]
+
+
+def test_climbed_stair_wins_a_tie_with_an_elevator():
+    wm = _stairs_demo({"0": [_elev("e0", 2.0, 8.0, "e1")], "1": [_elev("e1", 2.0, 8.0, "e0")]})
+    (stairs,) = wm.level_hops("0", "1", _STAIRS)
+    (lift,) = wm.level_hops("0", "1")
+    assert (stairs.board_name, stairs.dest_name, stairs.kind) == ("stairs_low", "stairs_high", "stairs")
+    assert lift.board_name == "e0"
+
+
+def test_fewest_hops_beats_a_longer_climb():
+    wm = _stair_wm(
+        {
+            "0": [_stair("s01_low", 10.3, 2.0, "-x", "s01_high")],
+            "1": [_stair("s01_high", 3.7, 2.0, "+x", "s01_low", top=True), _stair("s12_low", 10.3, 5.0, "-x", "s12_high")],
+            "2": [_stair("s12_high", 3.7, 5.0, "+x", "s12_low", top=True)],
+        },
+        {"0": [_elev("e0", 2.0, 8.0, "e2")], "2": [_elev("e2", 2.0, 8.0, "e0")]},
+    )
+    assert [h.board_name for h in wm.level_hops("0", "2", _STAIRS)] == ["e0"]
+    assert [h.board_name for h in wm.level_hops("0", "1", _STAIRS)] == ["s01_low"]
+    assert [h.board_name for h in wm.level_hops("1", "0", _STAIRS)] == ["s01_high"]
+    del wm._world.levels["0"].elevators[0]
+    assert [h.board_name for h in wm.level_hops("0", "2", _STAIRS)] == ["s01_low", "s12_low"]
+    assert wm.level_hops("0", "2") == []
+
+
+def test_via_names_a_stair_half():
+    wm = _stairs_demo()
+    phases = route_phases([GoToPhase(pose=_pose(32.0, 8.0), via=("stairs_low",))], Position(2.0, 2.0), wm, climbs=("stairs",), **_GO1)
+    assert [type(p) for p in phases] == [StairsLegPhase, StairsRidePhase, StairsLegPhase, GoToPhase]
+    assert phases[-1].via == ()
+    assert _crossings(route_phases([GoToPhase(pose=_pose(32.0, 8.0), via=("stairs_low>stairs_high",))], Position(2.0, 2.0), wm, climbs=("stairs",), **_GO1)) == ["stairs_high"]
+    assert wm.via_hop("1.stairs_high", climbs=_STAIRS).dest_name == "stairs_low"
+    assert (wm.via_position("stairs_low").x, wm.via_position("stairs_low").y) == (pytest.approx(9.0), pytest.approx(2.0))
+    for via, climbs in (("stairs_low", ()), ("esc_up_high", ("escalator",)), ("stairs_low>nowhere", ("stairs",))):
+        with pytest.raises(ValueError):
+            route_phases([GoToPhase(pose=_pose(32.0, 8.0), via=(via,))], Position(2.0, 2.0), wm, climbs=climbs, **_GO1)
+
+
+def test_stair_into_an_unloaded_level_is_no_route():
+    wm = _stairs_demo({"0": [_elev("e0", 2.0, 8.0, "e1")], "1": [_elev("e1", 2.0, 8.0, "e0")]})
+    del wm._world.levels["1"]
+    assert wm.level_hops("0", "1", frozenset({"stairs", "escalator"})) == []
+    with pytest.raises(ValueError):
+        wm.stair_hop("stairs_low", climbs=_STAIRS)
+
+
+def test_via_stair_on_another_level_is_reached_by_auto_route():
+    wm = _stairs_demo()
+    phases = route_phases([GoToPhase(pose=_pose(2.0, 8.0), via=("esc_down_high",))], Position(2.0, 2.0), wm, climbs=("stairs", "escalator"), **_GO1)
+    assert _crossings(phases) == ["stairs_high", "esc_down_low"]
+
+
+@pytest.mark.parametrize("robot_radius", [0.2, 0.32, 0.45, 0.7])
+def test_crossing_goal_lies_past_the_trigger_and_clear_of_the_seam_wall(robot_radius):
+    from arena_simulation_setup.shared.world import STAIRS_SEAM_INSET
+
+    wm = _stairs_demo()
+    ride = wm.stair_ride(wm.stair_hop("stairs_low", climbs=_STAIRS), robot_radius)
+    stair = wm.find_stair("stairs_low")[1]
+    along = stair.along(ride.board_target.x, ride.board_target.y)
+    assert along >= stair.length - STAIRS_SEAM_INSET
+    assert stair.crossed(ride.board_target.x, ride.board_target.y)
+    if robot_radius <= 0.4:
+        assert along + robot_radius <= stair.length + 1e-9
+    phase = route_phases([GoToPhase(pose=_pose(32.0, 8.0))], Position(2.0, 2.0), wm, robot_radius=robot_radius, goal_tolerance=1.0, climbs=("stairs",))[1]
+    assert phase.tolerance_radius > 0.0
+    assert along - phase.tolerance_radius > stair.length - STAIRS_SEAM_INSET
+
+
+def test_approach_leg_is_met_only_facing_the_seam():
+    wm = _stairs_demo()
+    zones = zone_polygons(wm.world_compacted())
+    approach = route_phases([GoToPhase(pose=_pose(32.0, 8.0))], Position(2.0, 2.0), wm, climbs=("stairs",), **_GO1)[0]
+    assert isinstance(approach, StairsLegPhase)
+    assert approach.tolerance_angle == STAIRS_ALIGN_TOLERANCE
+    assert approach.tolerance_radius == STAIRS_APPROACH_TOLERANCE
+    x, y = approach.pose.position.x, approach.pose.position.y
+    assert PhaseMonitor(approach, "jackal").step(Sample(t=0.0, robots={"jackal": (x, y, math.pi / 2)}), zones) is False
+    assert PhaseMonitor(approach, "jackal").step(Sample(t=0.0, robots={"jackal": (x, y, 0.0)}), zones) is True
+
+
+def test_crossing_completes_once_the_robot_lands_on_the_partner_half():
+    wm = _stairs_demo()
+    zones = zone_polygons(wm.world_compacted())
+    ride = route_phases([GoToPhase(pose=_pose(32.0, 8.0))], Position(2.0, 2.0), wm, climbs=("stairs",), **_GO1)[1]
+    monitor = PhaseMonitor(ride, "jackal")
+    assert monitor.step(_at(0.0, 8.0, 2.0), zones) is False
+    assert monitor.step(_at(1.0, 10.0, 2.0), zones) is False
+    assert monitor.step(_at(2.0, 22.95, 2.0), zones) is True
+
+
+def test_submit_task_takes_the_stairs_for_a_climbing_robot():
+    wm = _stairs_demo()
+    rm, adapter, writes = _robot_manager(wm, env_offset=(0.0, 0.0), climbs=("stairs",))
+    asyncio.run(rm.submit_task(TaskRequest(phases=[GoToPhase(pose=_pose(32.0, 8.0))]), _pose(2.0, 2.0)))
+    assert [type(state.phase) for state in rm._runner.phases] == [StairsLegPhase, StairsRidePhase, StairsLegPhase, GoToPhase]
+    _tick(rm, 1.0, 8.0, 2.0)
+    assert rm._runner.active == 1 and adapter.dispatched[-1].pose.position.x == pytest.approx(9.0 + 2.6 - 0.3 - 0.05)
+    _tick(rm, 2.0, 10.0, 2.0)
+    _tick(rm, 3.0, 22.95, 2.0)
+    assert rm._runner.phases[1].outcome == "met"
+    assert rm._runner.active == 2 and adapter.dispatched[-1].pose.position.x == pytest.approx(26.0)
+    _tick(rm, 4.0, 26.0, 2.0)
+    assert rm._runner.active == 3
+    assert writes == []
+
+    plain, _, _ = _robot_manager(wm, env_offset=(0.0, 0.0))
+    asyncio.run(plain.submit_task(TaskRequest(phases=[GoToPhase(pose=_pose(32.0, 8.0))]), _pose(2.0, 2.0)))
+    assert len(plain._runner.phases) == 1

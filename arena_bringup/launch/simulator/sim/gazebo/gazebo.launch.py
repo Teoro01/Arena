@@ -205,6 +205,7 @@ def generate_launch_description():
             plugin_el.set('name', 'arena_gz_plugins::PedSkeletonPlugin')
             enabled_el = ET.SubElement(plugin_el, 'enabled')
             enabled_el.text = 'true'
+            ET.SubElement(plugin_el, 'topic_suffix').text = '/sim_peds'
             bone_map = _bone_map_path()
             if bone_map is not None:
                 bone_map_el = ET.SubElement(plugin_el, 'bone_map')

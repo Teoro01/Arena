@@ -1,4 +1,4 @@
-"""Runtime semantic kinds: door/elevator FSM facts plus scripted and position-derived M2 kinds."""
+"""Runtime semantic kinds: door/elevator/stair FSM facts plus scripted and position-derived M2 kinds."""
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ from typing import ClassVar
 
 import attrs
 
-from ._mechanism_shim import _DoorState, _near_door_segment, _reset_door, _reset_elevator
+from ._mechanism_shim import _DoorState, _near_door_segment, _reset_door, _reset_elevator, _reset_stair, stair_partner
 
 if typing.TYPE_CHECKING:
     from arena_simulation_setup.shared.semantics import SemanticCfg
     from task_generator.shared import Door
 
     from ._interface import MechanismITF
-    from ._mechanism_shim import _DoorRuntime, _ElevatorRuntime
+    from ._mechanism_shim import _DoorRuntime, _ElevatorRuntime, _StairsRuntime
 
 
 @attrs.define
@@ -320,6 +320,81 @@ class ElevatorSemantics(SemanticKind):
         if 'cabin_door_progress' in self._continuous:
             continuous['cabin_door_progress'] = cabin.progress if cabin is not None else 0.0
         return SemanticEntitySnapshot(self._entity, self.KIND, discrete, continuous, predicates, self._members())
+
+
+class _StairsSemantics(SemanticKind):
+    SUPPORTED_SIMS = frozenset({'gazebo', 'isaac', 'mujoco', 'flatsim'})
+
+    CONTINUOUS = ('occupants',)
+    PREDICATES = ('just_crossed',)
+
+    def __init__(
+        self,
+        mech: MechanismITF,
+        entity: str,
+        runtime: _StairsRuntime,
+        discrete: tuple[str, ...],
+        continuous: tuple[str, ...],
+        predicates: tuple[str, ...],
+    ) -> None:
+        super().__init__(entity, discrete, continuous, predicates)
+        self._mech = mech
+        self._runtime = runtime
+
+    @classmethod
+    def attach(cls, mech: MechanismITF, entity: str, cfgs: Sequence[SemanticCfg], *, polygon: Sequence[tuple[float, float]] | None = None) -> SemanticKind:
+        return cls(mech, entity, mech._stair_runtime[entity], cls.DISCRETE, cls.CONTINUOUS, cls.PREDICATES)
+
+    def reset(self) -> None:
+        _reset_stair(self._runtime)
+
+    def _discrete_values(self) -> dict[str, str]:
+        return {}
+
+    def snapshot(self) -> SemanticEntitySnapshot:
+        rt = self._runtime
+        return SemanticEntitySnapshot(
+            self._entity,
+            self.KIND,
+            self._discrete_values(),
+            {'occupants': float(len(rt.members))},
+            {'just_crossed': rt.just_crossed},
+            list(rt.members),
+        )
+
+
+@semantic_kind('stairs')
+class StairsSemantics(_StairsSemantics):
+    pass
+
+
+@semantic_kind('escalator')
+class EscalatorSemantics(_StairsSemantics):
+    DISCRETE = ('running', 'direction')
+    WRITABLE = frozenset({'running'})
+
+    def set_value(self, field: str, value: str) -> None:
+        """Write `running` on both halves of the pair."""
+        if field not in self.WRITABLE:
+            raise ValueError('field not writable')
+        token = value.strip().lower()
+        if token not in ('true', 'false'):
+            raise ValueError('malformed value')
+        partner = stair_partner(self._mech, self._runtime)
+        for rt in (self._runtime, partner):
+            if rt is not None:
+                rt.running = token == 'true'
+
+    def _direction(self) -> str:
+        stair = self._runtime.stair
+        partner = stair_partner(self._mech, self._runtime)
+        boarding = stair if stair.boards else partner.stair if partner is not None and partner.stair.boards else None
+        if boarding is None:
+            return ''
+        return 'down' if boarding.top else 'up'
+
+    def _discrete_values(self) -> dict[str, str]:
+        return {'running': _stringify(self._runtime.running), 'direction': self._direction()}
 
 
 @attrs.define
