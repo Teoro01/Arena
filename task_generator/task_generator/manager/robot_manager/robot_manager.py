@@ -502,7 +502,8 @@ class RobotManager(NodeInterface):
         if ended is not None and ended.outcome == "failed":
             self._logger.info(f"robot {self.name!r} phase {ended.index} ({ended.phase.kind}) failed ({ended.reason})")
         elif ended is not None and ended.outcome == "dropped" and ended.loop is not None:
-            self._logger.info(f"robot {self.name!r} left its loop at phase {ended.index} ({render_until(ended.loop.phase.until_node)})")
+            until = ended.loop.phase.until_node
+            self._logger.info(f"robot {self.name!r} left its loop at phase {ended.index} ({None if until is None else render_until(until)})")
         for scoped in transition.violated:
             self._logger.info(f"robot {self.name!r} condition {scoped.id} violated: {render_until(scoped.condition.p_node)}")
         if transition.stop:

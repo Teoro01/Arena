@@ -457,9 +457,9 @@ def _render_clause(node: Node) -> str | None:
 def _render_value(value: CompareValue) -> str:
     if isinstance(value, tuple):
         return f'[{value[0]:g}, {value[1]:g}]'
-    if isinstance(value, float):
-        return f'{value:g}'
-    return value
+    if isinstance(value, str):
+        return value
+    return f'{value:g}'
 
 
 def _render_compare(op: str, value: CompareValue) -> str:
