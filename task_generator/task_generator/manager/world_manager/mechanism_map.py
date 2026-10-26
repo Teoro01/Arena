@@ -67,6 +67,12 @@ def blocked_doors(
     return frozenset(blocked)
 
 
+def mask_doors(doors: Iterable[Door], world_doors: Iterable[tuple[str, Door]], blocked: frozenset[str]) -> list[Door]:
+    """The doors the door mask frees: all but those served as blocked, matched by their world-unique name."""
+    blocked_names = {door.name for name, door in world_doors if name in blocked}
+    return [door for door in doors if door.name not in blocked_names]
+
+
 def paint_segments(png_bytes: bytes, map_yaml_text: str, segments: Iterable[tuple[tuple[float, float], tuple[float, float], float]]) -> bytes:
     """Return the map PNG with each (start, end, width) segment (map-frame metres) painted occupied."""
     map_yaml = yaml.safe_load(map_yaml_text)

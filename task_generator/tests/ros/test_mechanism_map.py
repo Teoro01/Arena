@@ -108,6 +108,16 @@ def test_paint_rgb_image():
     assert PIL.Image.open(io.BytesIO(painted)).getpixel((20, 59 - 20)) == (0, 0, 0)
 
 
+# door mask
+
+
+def test_door_mask_leaves_out_the_doors_served_as_blocked():
+    locked, plain = _door("g", activation=0.0), _door("p", start=(6.0, 1.5), end=(6.0, 2.5))
+    world_doors = [("env0/g/1", locked), ("env0/p/1", plain)]
+    assert mechanism_map.mask_doors([locked, plain], world_doors, frozenset({"env0/g/1"})) == [plain]
+    assert mechanism_map.mask_doors([locked, plain], world_doors, frozenset()) == [locked, plain]
+
+
 # WorldManagerROS flow
 
 
@@ -155,7 +165,8 @@ def _wm_ros(doors: list[Door], level_origin=(10.0, 0.0)):
         loads.append(png)
 
     wm._load_png_to_server = _load
-    wm._publish_door_mask = lambda *a, **kw: None
+    wm.masks = []
+    wm._publish_door_mask = lambda *a, **kw: wm.masks.append(wm._mechanism_served)
     return wm, snapshots, loads
 
 
@@ -173,6 +184,7 @@ def test_world_manager_ros_mechanism_map_follows_semantics():
         wm.set_mechanism_map(True, ["burger", "env0/burger"])
         await wm._mechanism_task
         assert wm._mechanism_served == {"env0/g/1"} and len(loads) == 2
+        assert wm.masks[-1] == {"env0/g/1"}
         assert _pixel(loads[-1], yaml_text, 14.0, 2.0) == 0
         assert _pixel(loads[-1], yaml_text, 4.0, 2.0) == 255
 
@@ -183,6 +195,7 @@ def test_world_manager_ros_mechanism_map_follows_semantics():
         wm._update_mechanism_map(snapshots)
         await wm._mechanism_task
         assert wm._mechanism_served == frozenset() and loads[-1] == png
+        assert wm.masks[-1] == frozenset()
 
         snapshots[:] = [_snap("env0/g/1", "gate", locked=True)]
         wm._update_mechanism_map(snapshots)

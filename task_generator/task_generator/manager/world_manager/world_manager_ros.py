@@ -130,7 +130,7 @@ class WorldManagerROS(MapServerHandler, WorldManager):
     _map_server_present: bool
     _map_render_memo: dict[str, tuple[bytes, str]]
     _static_markers: list[visualization_msgs.msg.Marker] | None
-    _served_map: tuple[bytes, str] | None
+    _served_map: tuple[bytes, str, Level] | None
     _mechanism_map_enabled: bool
     _mechanism_agents: tuple[str, ...]
     _mechanism_blocked: frozenset[str]
@@ -331,7 +331,7 @@ class WorldManagerROS(MapServerHandler, WorldManager):
 
     async def _load_map_to_server(self, png_bytes: bytes, map_yaml_text: str, description: Level) -> None:
         """Shift+LoadMap+door-mask. Caller guarantees map_server is present. Applies the mechanism map if enabled."""
-        self._served_map = (png_bytes, map_yaml_text)
+        self._served_map = (png_bytes, map_yaml_text, description)
         blocked = self._mechanism_blocked if self._mechanism_map_enabled else frozenset()
         await self._load_png_to_server(self._paint_blocked(png_bytes, map_yaml_text, blocked), map_yaml_text)
         self._mechanism_served = blocked
@@ -394,10 +394,11 @@ class WorldManagerROS(MapServerHandler, WorldManager):
         try:
             while self._served_map is not None and self._mechanism_served != self._mechanism_blocked:
                 blocked = self._mechanism_blocked
-                png_bytes, map_yaml_text = self._served_map
+                png_bytes, map_yaml_text, description = self._served_map
                 async with self._map_server_lock:
                     await self._load_png_to_server(self._paint_blocked(png_bytes, map_yaml_text, blocked), map_yaml_text)
                 self._mechanism_served = blocked
+                self._publish_door_mask(description, png_bytes, map_yaml_text)
                 self._logger.info(f'mechanism map: {len(blocked)} door(s) served as occupied: {sorted(blocked)}')
         except Exception as exc:
             self._logger.error(f'mechanism map push failed: {exc!r}')
@@ -419,7 +420,7 @@ class WorldManagerROS(MapServerHandler, WorldManager):
         png_bytes: bytes,
         map_yaml_text: str,
     ) -> None:
-        """Publish an OccupancyGrid: 0 inside door polygons, -1 elsewhere. Aligned to the static map."""
+        """Publish an OccupancyGrid: 0 inside door polygons, -1 elsewhere, without the doors the mechanism map serves as blocked. Aligned to the static map."""
         img = PIL.Image.open(io.BytesIO(png_bytes))
         width, height = img.size
 
@@ -427,7 +428,8 @@ class WorldManagerROS(MapServerHandler, WorldManager):
         resolution = float(map_yaml['resolution'])
         origin_world = list(map_yaml.get('origin', [0, 0, 0]))
 
-        polys = [p for d in description.all_doors for p in render_door_polygons(d)] + [p for e in description.all_elevators for p in render_elevator_polygons(e)]
+        doors = mechanism_map.mask_doors(description.all_doors, self._world_doors(), self._mechanism_served)
+        polys = [p for d in doors for p in render_door_polygons(d)] + [p for e in description.all_elevators for p in render_elevator_polygons(e)]
         data = door_mask(polys, description.all_walls, width, height, resolution, (float(origin_world[0]), float(origin_world[1])), _DOOR_MASK_BUFFER_M)
 
         shifted_origin = self._environment_manager.realize(Position(x=float(origin_world[0]), y=float(origin_world[1])))

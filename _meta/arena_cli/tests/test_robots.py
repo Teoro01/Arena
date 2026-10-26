@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from arena_cli.features import robots
+from arena_cli.complete import Context, _expand
+from arena_cli.features import planners, robots
 
 GITMODULES = """\
 [submodule "arena_robots/robots/mpo700/meshes"]
@@ -136,3 +137,23 @@ def test_robot_with_every_submodule_checked_out_is_ready(tmp_path, capsys):
     assert "[x] lidar/sick_s300" in lines
     assert "[ ] arm/ur" in lines
     assert "mpo700" in robots._ready_robots(arena)
+
+
+def test_sim_preflight_suite_gives_each_robot_its_own_preflight_stage():
+    suite = planners.preflight_suite(["go1", "boxer"])
+    assert [(stage["name"], stage["robot"]) for stage in suite["stages"]] == [("preflight-go1", "go1"), ("preflight-boxer", "boxer")]
+    assert {stage["config"]["scenario"]["file"] for stage in suite["stages"]} == {"preflight"}
+    assert suite["launch"]["env.bootstrap_timeout"] == 90
+
+
+def test_planner_preflight_suite_keeps_each_contestant_robot():
+    assert [(stage["name"], stage["robot"]) for stage in planners.preflight_suite()["stages"]] == [("preflight", "auto")]
+
+
+_RUNTIME_MANIFEST = {"launch": {"arena_bringup/arena_runtime.launch.py": {"sim": {"desc": "simulator", "default": "gazebo"}}}, "values": {"sim": ["gazebo", "isaac", "mujoco", "flatsim"]}}
+
+
+def test_preflight_verbs_complete_the_simulator() -> None:
+    for spec in (robots.COMMANDS["check"].complete, planners.COMMANDS["test"].complete):
+        assert "sim:=" in {value for value, _desc, _group in _expand(spec, [], "", Context("", _RUNTIME_MANIFEST)).items}
+        assert {"gazebo", "isaac", "mujoco", "flatsim"} <= {value for value, _desc, _group in _expand(spec, [], "sim:=", Context("", _RUNTIME_MANIFEST)).items}

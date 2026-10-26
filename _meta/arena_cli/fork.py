@@ -1,5 +1,6 @@
 """Forks: isolated containers on frozen releases of the dev tree."""
 
+import contextlib
 import dataclasses
 import datetime
 import fcntl
@@ -30,6 +31,7 @@ _RCFILE = "/opt/arena_ws/src/Arena/_meta/docker/features/docker/rcfile"
 _FORK_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 _OVERLAYS = ("src", "build", "install", "venv", "uv-python")
 _FORMAT = 2
+_PRUNE_GRACE_S = 600
 _DEV_SRC = "/opt/arena_ws/.dev-src"
 _SOURCED = 'source /opt/arena_ws/source >/dev/null; eval "$1"'
 
@@ -67,6 +69,14 @@ def _release_ids() -> list[str]:
     return sorted(e for e in os.listdir(root) if not e.startswith(".") and e != "latest" and os.path.isdir(os.path.join(root, e)))
 
 
+@contextlib.contextmanager
+def _releases_lock() -> Iterator[None]:
+    os.makedirs(_releases(), exist_ok=True)
+    with open(os.path.join(_releases(), ".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def _meta(release: str) -> dict:
     path = os.path.join(_releases(), release, "release.json")
     if not os.path.isfile(path):
@@ -89,8 +99,8 @@ def _walk(root: str, rel: str = "", skip_top: frozenset[str] = frozenset()) -> I
                 yield r, False
 
 
-def _freeze(src: str, dst: str | None, prev: str | None, entries: Iterable[tuple[str, bool]], link_source: Callable[[str], bool]) -> _Part:
-    """Copy src into dst, hardlinking files unchanged since prev or, where link_source says so, from src. A dst of None only counts."""
+def _freeze(src: str, dst: str | None, prev: str | None, entries: Iterable[tuple[str, bool]], link_source: Callable[[str], bool], by_content: bool) -> _Part:
+    """Copy src into dst, hardlinking files unchanged since prev (same mtime, or same content where by_content) or, where link_source says so, from src. A dst of None only counts."""
     part = _Part()
     if dst is not None:
         os.makedirs(dst, exist_ok=True)
@@ -125,7 +135,7 @@ def _freeze(src: str, dst: str | None, prev: str | None, entries: Iterable[tuple
             if dst is not None:
                 os.link(s, d)
             part.changed += counted and not (ps is not None and os.path.samestat(ps, ss))
-        elif p is not None and ps is not None and stat.S_ISREG(ps.st_mode) and ps.st_size == ss.st_size and (ps.st_mtime_ns == ss.st_mtime_ns or filecmp.cmp(p, s, shallow=False)):
+        elif p is not None and ps is not None and stat.S_ISREG(ps.st_mode) and ps.st_size == ss.st_size and (ps.st_mtime_ns == ss.st_mtime_ns or (by_content and filecmp.cmp(p, s, shallow=False))):
             if dst is not None:
                 os.link(p, d)
         else:
@@ -180,9 +190,7 @@ def _release() -> str:
     t_build = time.monotonic() - t0
 
     root = _releases()
-    os.makedirs(root, exist_ok=True)
-    with open(os.path.join(root, ".lock"), "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _releases_lock():
         latest = _latest()
         prev = os.path.join(root, latest) if latest else None
         venvs = {pkg for pkg in os.listdir(os.path.join(ws, "build")) if os.path.isfile(os.path.join(ws, "build", pkg, "venv", "pyvenv.cfg"))}
@@ -195,18 +203,18 @@ def _release() -> str:
         stores: list[str] = []
         venv = os.environ.get("ARENA_VENV_DIR", "/opt/venv")
         sources = {
-            "src": ("src", src, lambda: _without_git_stores(src, _walk(src, skip_top=frozenset({"Arena/_assets"})), stores), lambda rel: False),
-            "build": ("build", os.path.join(ws, "build"), lambda: _walk(os.path.join(ws, "build"), skip_top=frozenset({".forks", ".uv-cache"})), planner_venv),
-            "install": ("install", os.path.join(ws, "install"), lambda: _walk(os.path.join(ws, "install")), lambda rel: False),
-            "venv": (os.path.join("src", "Arena", ".venv"), venv, lambda: _walk(venv), lambda rel: False),
-            "uv-python": ("uv-python", os.path.join(ws, ".uv-python"), lambda: _walk(os.path.join(ws, ".uv-python")), lambda rel: False),
+            "src": ("src", src, lambda: _without_git_stores(src, _walk(src, skip_top=frozenset({"Arena/_assets"})), stores), lambda rel: False, True),
+            "build": ("build", os.path.join(ws, "build"), lambda: _walk(os.path.join(ws, "build"), skip_top=frozenset({".forks", ".uv-cache"})), planner_venv, False),
+            "install": ("install", os.path.join(ws, "install"), lambda: _walk(os.path.join(ws, "install")), lambda rel: False, False),
+            "venv": (os.path.join("src", "Arena", ".venv"), venv, lambda: _walk(venv), lambda rel: False, True),
+            "uv-python": ("uv-python", os.path.join(ws, ".uv-python"), lambda: _walk(os.path.join(ws, ".uv-python")), lambda rel: False, True),
         }
         t1 = time.monotonic()
         repos = _repos(src)
         if latest is not None and prev is not None and _meta(latest).get("format") == _FORMAT and repos == _meta(latest).get("repos"):
             prev_parts = _meta(latest).get("parts", {})
-            for name, (dest, path, entries, link_source) in sources.items():
-                p = _freeze(path, None, os.path.join(prev, dest), entries(), link_source)
+            for name, (dest, path, entries, link_source, by_content) in sources.items():
+                p = _freeze(path, None, os.path.join(prev, dest), entries(), link_source, by_content)
                 if p.changed or p.files != prev_parts.get(name, {}).get("files"):
                     break
             else:
@@ -222,9 +230,9 @@ def _release() -> str:
         tmp = os.path.join(root, f".tmp-{release}")
         stores.clear()
         parts: dict[str, _Part] = {}
-        for name, (dest, path, entries, link_source) in sources.items():
+        for name, (dest, path, entries, link_source, by_content) in sources.items():
             ts = time.monotonic()
-            parts[name] = _freeze(path, os.path.join(tmp, dest), os.path.join(prev, dest) if prev else None, entries(), link_source)
+            parts[name] = _freeze(path, os.path.join(tmp, dest), os.path.join(prev, dest) if prev else None, entries(), link_source, by_content)
             p = parts[name]
             print(f"release: {name:<9} {p.files:>7} files, {p.changed:>6} changed, {p.bytes / 1e6:>9.1f} MB copied, {time.monotonic() - ts:5.1f}s", flush=True)
         for store in stores:
@@ -253,10 +261,12 @@ def _release() -> str:
 
 
 def _prune() -> None:
-    """Delete releases neither latest nor used by a fork."""
+    """Delete releases neither latest, used by a fork, nor frozen in the last ten minutes. Caller holds the releases lock."""
     keep = {_latest()} | {pathlib.Path(_root(), name, "release").read_text().strip() for name in os.listdir(_root()) if os.path.isfile(os.path.join(_root(), name, "release"))}
+    fresh = time.time() - _PRUNE_GRACE_S
     for rid in _release_ids():
-        if rid not in keep:
+        meta = os.path.join(_releases(), rid, "release.json")
+        if rid not in keep and (not os.path.isfile(meta) or os.path.getmtime(meta) < fresh):
             shutil.rmtree(os.path.join(_releases(), rid))
             print(f"release: {rid} pruned, no fork uses it", flush=True)
 
@@ -392,7 +402,8 @@ def _delete(fork: str, forks: dict[str, dict[str, str]]) -> None:
     if features.engine(["run", "--rm", "--user", "0", "--entrypoint", "rm", "-v", f"{_env('HOST_ARENA_WS_DIR')}/build/.forks:/forks", _env("ARENA_IMAGE"), "-rf", f"/forks/{fork}"]):
         raise CLIError(f"could not delete build/.forks/{fork}")
     print(f"{fork}: {forks[fork]['kind']} deleted ({time.monotonic() - t0:.1f}s)", flush=True)
-    _prune()
+    with _releases_lock():
+        _prune()
 
 
 def _pool(n: int) -> list[str]:

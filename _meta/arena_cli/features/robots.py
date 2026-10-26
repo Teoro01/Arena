@@ -2,7 +2,6 @@
 
 import argparse
 import configparser
-import csv
 import json
 import os
 import re
@@ -12,7 +11,7 @@ from pathlib import Path
 
 from arena_cli import common, complete
 from arena_cli.common import Verb, make_verb
-from arena_cli.complete import Flags, Static, Union
+from arena_cli.complete import Flags, LaunchArgs, Static, Union
 
 _NAME = "robots"
 
@@ -23,9 +22,9 @@ DESCRIPTION = (
     "  rm <name...|--all>   deinit robot/component submodules (alias: uninstall <name...>)\n"
     "  ls                   list robots and components, [x] ready, [ ] pending\n"
     "  check [--all]        verify all package://arena_robots/... URIs resolve\n"
+    "  check --sim [--lanes N] <name...|--all>  short start-and-drive preflight per robot via the benchmark runner, over N lanes with --lanes, each in its own fork (needs the evaluation feature)\n"
     "  update               refresh initialized robot submodules\n"
-    "  uninstall            deinit all robot submodules\n"
-    "  drive [opts]         run a random-goal episode per ready robot, report success/total"
+    "  uninstall            deinit all robot submodules"
 )
 
 _SDK_SUBDIR = "arena_robots"
@@ -403,15 +402,6 @@ def cmd_check(arena: Path, args: argparse.Namespace) -> int:
     return 1
 
 
-DRIVE_EMPTY_RANDOM = {
-    "static": {"min": 0, "max": 0},
-    "dynamic": {"min": 0, "max": 0},
-    "interactive": {"min": 0, "max": 0},
-}
-DRIVE_OWN_KEYS = frozenset({"map", "episodes", "timeout"})
-KV_RE = re.compile(r"^([\w.]+):=(.*)$")
-
-
 def _ready_robots(arena: Path) -> list[str]:
     subs = robot_submodules(arena)
     status = submodule_status(arena)
@@ -421,139 +411,6 @@ def _ready_robots(arena: Path) -> list[str]:
             continue
         ready.append(robot)
     return ready
-
-
-def _drive_suite(robots: list[str], *, map_name: str, episodes: int, timeout: str) -> dict:
-    return {
-        "stages": [
-            {
-                "name": f"drive-{robot}",
-                "robot": robot,
-                "map": map_name,
-                "episodes": episodes,
-                "tm_robots": "random",
-                "tm_obstacles": "random",
-                "config": {"random": dict(DRIVE_EMPTY_RANDOM)},
-                "timeout": timeout,
-            }
-            for robot in robots
-        ]
-    }
-
-
-def _benchmark_data_root() -> Path:
-    env = os.environ.get("ARENA_DATA_DIR")
-    if env:
-        return Path(env) / "benchmarks"
-    out = subprocess.run(
-        ["ros2", "pkg", "prefix", "arena_evaluation"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if out.returncode != 0:
-        sys.exit("error: ARENA_DATA_DIR is unset and `ros2 pkg prefix arena_evaluation` failed")
-    return Path(out.stdout.strip()) / "share" / "arena_evaluation" / "data"
-
-
-def _newest_run(data_root: Path) -> Path | None:
-    if not data_root.is_dir():
-        return None
-    runs = [p for p in data_root.iterdir() if p.is_dir()]
-    if not runs:
-        return None
-    return max(runs, key=lambda p: p.stat().st_mtime)
-
-
-def _summarize(run_dir: Path) -> tuple[dict[str, tuple[int, int]], bool]:
-    csv_path = run_dir / "progress.csv"
-    if not csv_path.is_file():
-        sys.exit(f"error: no progress.csv at {csv_path}")
-    totals: dict[str, int] = {}
-    successes: dict[str, int] = {}
-    with csv_path.open() as fh:
-        for row in csv.DictReader(fh):
-            robot = row["robots"]
-            totals[robot] = totals.get(robot, 0) + 1
-            if row["outcome_state"] == "2":
-                successes[robot] = successes.get(robot, 0) + 1
-    summary = {r: (successes.get(r, 0), totals[r]) for r in totals}
-    all_drove = bool(summary) and all(s > 0 for s, _ in summary.values())
-    return summary, all_drove
-
-
-def cmd_drive(arena: Path, args: argparse.Namespace) -> int:
-    own: dict[str, str] = {}
-    passthrough: list[str] = []
-    selected: list[str] = []
-    for tok in args.kv:
-        match = KV_RE.match(tok)
-        if match:
-            key, value = match.group(1), match.group(2)
-            if key in DRIVE_OWN_KEYS:
-                own[key] = value
-            else:
-                passthrough.append(tok)
-        else:
-            selected.append(tok)
-
-    ready = _ready_robots(arena)
-    if not ready:
-        print("robots: no ready robots, run `arena feature robots add ...` first", file=sys.stderr)
-        return 2
-    if selected:
-        ready_set = set(ready)
-        unknown = [r for r in selected if r not in ready_set]
-        if unknown:
-            print(
-                f"robots: not ready: {', '.join(unknown)}. ready: {', '.join(ready)}",
-                file=sys.stderr,
-            )
-            return 2
-        seen: dict[str, None] = {}
-        for r in selected:
-            seen.setdefault(r, None)
-        robots = list(seen)
-    else:
-        robots = ready
-    suite = _drive_suite(
-        robots,
-        map_name=own.get("map", "map_empty"),
-        episodes=int(own.get("episodes", "3")),
-        timeout=own.get("timeout", "30s"),
-    )
-    cmd = [
-        "ros2",
-        "run",
-        "arena_evaluation",
-        "benchmark",
-        "--suite",
-        json.dumps(suite),
-        "--contest",
-        '[{"name":"default"}]',
-        *passthrough,
-    ]
-    print(
-        f"robots: drive audit for {len(robots)} robot(s): {', '.join(robots)}",
-        file=sys.stderr,
-    )
-    rc = subprocess.run(cmd, check=False).returncode
-    run_dir = _newest_run(_benchmark_data_root())
-    if run_dir is None:
-        print("robots: drive completed but no run directory found", file=sys.stderr)
-        return rc or 1
-    summary, all_drove = _summarize(run_dir)
-    width = max(len("ROBOT"), *(len(r) for r in summary)) if summary else len("ROBOT")
-    print()
-    print(f"  {'ROBOT':<{width}}  SUCCESS  TOTAL")
-    for robot in sorted(summary):
-        s, t = summary[robot]
-        print(f"  {robot:<{width}}  {s:>7}  {t:>5}")
-    print()
-    print(f"run: {run_dir}")
-    if rc != 0:
-        return rc
-    return 0 if all_drove else 1
 
 
 def _deps_build() -> int:
@@ -607,19 +464,51 @@ def ls(argv: list[str]) -> None:
     sys.exit(cmd_ls(Path(common._env("ARENA_DIR")), args))
 
 
+def _check_sim(argv: list[str]) -> None:
+    """Preflight robots in the simulator through the benchmark runner."""
+    from arena_cli import fork
+    from arena_cli.features import evaluation, planners
+
+    common._reg_require("evaluation")
+    lanes, argv = fork.split_lanes(argv)
+    head, rest = argv, []
+    for i, a in enumerate(argv):
+        if a.startswith("--") and a != "--all":
+            head, rest = argv[:i], argv[i:]
+            break
+    names = [a for a in head if ":=" not in a and not a.startswith("-")]
+    rest = [a for a in head if ":=" in a] + rest
+    ready = _ready_robots(Path(common._env("ARENA_DIR")))
+    if "--all" in head:
+        if names:
+            raise common.CLIError("robots check --sim: --all is mutually exclusive with robot names")
+        names = ready
+        if not names:
+            raise common.CLIError("robots check --sim: no ready robots, see 'arena feature robots ls'")
+    elif not names:
+        raise common.CLIError(f"robots check --sim: specify robot name(s) or --all, ready: {', '.join(ready) or 'none'}")
+    unknown = [name for name in names if name not in ready]
+    if unknown:
+        raise common.CLIError(f"robots check --sim: not ready: {', '.join(unknown)}, run 'arena feature robots add {' '.join(unknown)}' (ready: {', '.join(ready) or 'none'})")
+    suite = planners.preflight_suite(list(dict.fromkeys(names)))
+    evaluation.benchmark(["--suite", json.dumps(suite), "--contest", '[{"name": "default"}]', *planners.PREFLIGHT_VERDICT, *rest, *(["--lanes", str(lanes)] if lanes else [])])
+
+
 def check(argv: list[str]) -> None:
-    ap = argparse.ArgumentParser(prog="robots check")
-    ap.add_argument("--all", action="store_true")
-    ap.add_argument("-q", "--quiet", action="store_true")
+    """Verify every package://arena_robots/... URI resolves, or preflight robots in the simulator with --sim.
+
+    `arena feature robots check [--all] [-q]`: static URI check, `--all` includes robots whose mesh submodules are not checked out.
+    `arena feature robots check --sim [--lanes N] <name...|--all> [sim:=gazebo] [KEY:=VALUE ...]`: per robot two episodes of
+    map_empty's `preflight` scenario under its default planner, verdict wedged/weak/ok, exit 3 on either (needs the evaluation feature).
+    """
+    if "--sim" in argv:
+        _check_sim([a for a in argv if a != "--sim"])
+        return
+    ap = argparse.ArgumentParser(prog="arena feature robots check", description="Verify every package://arena_robots/... URI resolves.", epilog="--sim [--lanes N] <name...|--all> [sim:=...] [KEY:=VALUE ...] preflights robots in the simulator instead, see 'arena planners test --preflight' for the verdict")
+    ap.add_argument("--all", action="store_true", help="also check robots whose mesh submodules are not checked out")
+    ap.add_argument("-q", "--quiet", action="store_true", help="print only failures")
     args = ap.parse_args(argv)
     sys.exit(cmd_check(Path(common._env("ARENA_DIR")), args))
-
-
-def drive(argv: list[str]) -> None:
-    ap = argparse.ArgumentParser(prog="robots drive")
-    ap.add_argument("kv", nargs="*", help="bare tokens select robots (default: all ready), key:=value pairs for map/episodes/timeout are consumed locally, the rest forwards to the benchmark runner")
-    args = ap.parse_args(argv)
-    sys.exit(cmd_drive(Path(common._env("ARENA_DIR")), args))
 
 
 def install(argv: list[str]) -> None:
@@ -645,8 +534,7 @@ COMMANDS: dict[str, Verb] = {
         make_verb("update", update, passthrough=True, help_text="refresh initialized submodules"),
         make_verb("rm", rm, passthrough=True, help_text="deinit robot/component submodules (alias: uninstall <name...>)", complete=Union(_SELECT, Flags({"-f": "deinit shared paths too"}))),
         make_verb("ls", ls, passthrough=True, help_text="list robots and components, [x] ready, [ ] pending"),
-        make_verb("check", check, passthrough=True, help_text="verify all package://arena_robots/... URIs resolve", complete=Union(_ALL, Flags({"-q": "quiet"}))),
-        make_verb("drive", drive, passthrough=True, help_text="run a random-goal episode per ready robot, report success/total"),
+        make_verb("check", check, passthrough=True, complete=Union(_SELECT, Flags({"-q": "quiet", "--sim": "preflight robots in the simulator", "--lanes": "spread the robots over N lanes, each in its own fork"}), LaunchArgs("arena_bringup", "arena_runtime.launch.py"))),
         make_verb("install", install, passthrough=True, help_text="clone robot/component submodules (alias for add)", complete=_SELECT),
         make_verb("uninstall", uninstall, passthrough=True, help_text="deinit all submodules (alias: rm --all)", complete=Static(_names)),
     ]

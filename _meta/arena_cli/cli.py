@@ -496,7 +496,8 @@ def rebuild(args: list[str]) -> None:
 
     Accepts bare package names or colcon selection flags, e.g.
     `arena rebuild foo bar` or `arena rebuild --packages-select-regex 'arena_.*'`.
-    Bare names expand to --packages-above like `arena build`.
+    Only the selected packages are cleaned. Bare names then build with
+    --packages-above like `arena build`, so dependents rebuild incrementally.
     """
     import shutil
 
@@ -505,7 +506,7 @@ def rebuild(args: list[str]) -> None:
     if not args:
         raise CLIError("rebuild needs a package selection")
     argv = _select_args(args, above=True)
-    pkgs = resolve_packages(argv)
+    pkgs = resolve_packages(_select_args(args))
     if not pkgs:
         raise CLIError("no packages matched")
     ws = workspace()

@@ -286,7 +286,10 @@ latest stamp is newer than `T - period_s`, compared at the clock's
 nanosecond resolution: the gate asks whether the producer has covered the
 clock, never whether it landed on a window boundary, so a producer whose
 own grid is phased against the ledger's cannot deadlock the run. Windows
-only pick the step sizes the scheduler takes. A producer driven by the sim
+only pick the step sizes the scheduler takes, and a covered hard channel's
+next check falls at its latest stamp plus `period_s`, so one beat never
+covers more than one period past its stamp, even when physics steps
+overshoot the due tick. A producer driven by the sim
 clock registers `period_s` equal to its own tick length, which paces the
 sim to the producer's true coverage. An elapsed-based rate loop registers
 a period strictly above its interval. The arena_humansim engine ticks off

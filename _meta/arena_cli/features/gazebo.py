@@ -9,7 +9,7 @@ from arena_cli.features import lifecycle_verbs, source_verb
 
 NAME = "gazebo"
 
-DESCRIPTION = "Gazebo simulator (ros_gz + OpenUSD tooling, gz-sim overlay with per-bone actor control)."
+DESCRIPTION = "Gazebo simulator (ros_gz + OpenUSD tooling, gz-sim overlay with per-bone actor control, gz-rendering overlay that survives camera removal)."
 
 _FORMATS_SOURCE = 'case "$ARENA_MODELS_FORMATS" in *sdf*) ;; *) export ARENA_MODELS_FORMATS="${ARENA_MODELS_FORMATS},sdf" ;; esac'
 
@@ -35,6 +35,19 @@ def _source_env() -> dict[str, str]:
 
 
 _GZ_SIM_SOURCE = os.path.join("src", "tools", "gz-sim")
+_GZ_RENDERING_SOURCE = os.path.join("src", "tools", "gz-rendering")
+
+
+def _build_gz_rendering() -> int:
+    """Build the gz-rendering8 overlay from src/tools/gz-rendering, pulled through gazebo.repos."""
+    import sys
+
+    if not os.path.isdir(os.path.join(common._env("ARENA_WS_DIR"), _GZ_RENDERING_SOURCE)):
+        print(f"gz-rendering source missing at {_GZ_RENDERING_SOURCE}, `arena feature gazebo install` pulls it", file=sys.stderr)
+        return 1
+    ogre_next = os.path.join("/opt/ros", common._env("ARENA_ROS_DISTRO"), "opt", "gz_ogre_next_vendor", "lib", "pkgconfig")
+    pkg_config_path = ":".join(p for p in (ogre_next, os.environ.get("PKG_CONFIG_PATH", "")) if p)
+    return common._cli("build", "--cmake-args", "-DBUILD_TESTING=OFF", env={**os.environ, "BASE_PATHS": _GZ_RENDERING_SOURCE, "PKG_CONFIG_PATH": pkg_config_path})
 
 
 def _build_gz_sim() -> int:
@@ -51,11 +64,11 @@ def _build_gz_sim() -> int:
 
 
 def _update() -> int:
-    """Build the gz-sim overlay in the container, install ros_gz and OpenUSD on the host."""
+    """Build the gz-rendering and gz-sim overlays in the container, install ros_gz and OpenUSD on the host."""
     import subprocess
 
     if features.in_container():
-        return _build_gz_sim()
+        return _build_gz_rendering() or _build_gz_sim()
 
     env = _source_env()
     ws_dir = common._env("ARENA_WS_DIR")

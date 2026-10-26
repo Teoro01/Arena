@@ -223,7 +223,7 @@ def test_agent_type_extends_cycle_is_rejected(tmp_path: Path) -> None:
 
 
 _IDLE = 0
-_SEATED_HIP = 1.4543
+_SEATED_HIP = 1.5194
 
 
 def test_default_profile_carries_no_limits_and_the_builtin_idle() -> None:
@@ -274,8 +274,8 @@ def test_seated_library_entry_holds_the_last_sit_frame() -> None:
     assert set(seated.joints) == set(JOINT_NAMES)
     assert all(js.signal.harmonics == () and js.shift == 0.0 for js in seated.joints.values())
     assert seated.joints["l_r_hip"].signal.mean == _SEATED_HIP
-    assert seated.joints["l_knee"].signal.mean == pytest.approx(-1.9511, abs=1e-4)
-    assert seated.joints["r_knee"].signal.mean == pytest.approx(-1.9073, abs=1e-4)
+    assert seated.joints["l_knee"].signal.mean == pytest.approx(-2.0431, abs=1e-4)
+    assert seated.joints["r_knee"].signal.mean == pytest.approx(-1.9992, abs=1e-4)
     for joint, js in seated.joints.items():
         lo, hi = seated.limits.get(joint, LIMITS[JOINT_NAMES.index(joint)])
         assert lo <= js.signal.mean <= hi, joint
@@ -290,7 +290,7 @@ def test_idle_from_a_library_profile_holds_the_pose_at_unit_gain() -> None:
     assert gen.phase(5) == pytest.approx(start + 3 * 2.0 * math.pi * 0.25 * 0.1)
     assert all(frame == frames[0] for frame in frames)
     assert frames[0]["l_r_hip"] == _SEATED_HIP
-    assert frames[0]["l_knee"] == pytest.approx(-1.9511, abs=1e-4)
+    assert frames[0]["l_knee"] == pytest.approx(-2.0431, abs=1e-4)
     assert gen.compute(5, 3, 2.0, 0.1, profile=profile) == frames[0]
     assert gen.compute(5, _IDLE, 0.0, 0.1)["l_r_hip"] == 0.0
 
@@ -305,7 +305,7 @@ def test_seated_wheelchair_library_entry_is_a_mirrored_held_posture() -> None:
         assert mean[f"l_{joint}"] == mean[f"r_{joint}"], joint
     for joint in ("y_shoulder", "r_shoulder", "y_ankle"):
         assert mean[f"l_{joint}"] == -mean[f"r_{joint}"], joint
-    assert (mean["l_r_hip"], mean["l_knee"]) == (1.5, -1.22)
+    assert (mean["l_r_hip"], mean["l_knee"]) == (1.572, -1.3178)
     for joint, value in mean.items():
         lo, hi = chair.limits.get(joint, LIMITS[JOINT_NAMES.index(joint)])
         assert lo <= value <= hi, joint
@@ -358,8 +358,8 @@ def test_wheelchair_section_keeps_the_seat_and_swings_both_arms_in_phase() -> No
     }
     profile = resolve_pose_profile(section)
     seated = {joint: js.signal.mean for joint, js in load_library()["seated"].joints.items()}
-    assert (seated["l_r_hip"], seated["r_r_hip"]) == pytest.approx((1.4543, 1.3975), abs=1e-4)
-    assert (seated["l_knee"], seated["r_knee"]) == pytest.approx((-1.9511, -1.9073), abs=1e-4)
+    assert (seated["l_r_hip"], seated["r_r_hip"]) == pytest.approx((1.5194, 1.4633), abs=1e-4)
+    assert (seated["l_knee"], seated["r_knee"]) == pytest.approx((-2.0431, -1.9992), abs=1e-4)
     gen = GaitGenerator()
     for speed in (0.1, 0.9, 2.0):
         for phi in (0.0, 1.0, 2.5, 4.0):

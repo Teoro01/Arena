@@ -394,3 +394,23 @@ def test_counts_survive_channel_removal_and_readd() -> None:
     ledger.observe(hard_due[0], ledger.tick)
     ledger.complete(hard_due)
     assert (ledger.gated_ticks, ledger.counts["/beat"].due, ledger.counts["/beat"].received) == (2, 2, 2)
+
+
+def test_a_beat_buys_one_period_when_steps_overshoot_the_due() -> None:
+    """A controller beats once per gate wait, stamped with the clock it was received at.
+    Physics steps that do not divide the period leave the clock past the due tick, and
+    that one beat buys at most one period plus the step it overshoots by, counted as one due."""
+    physics_dt = 0.0333
+    ledger = GateLedger(dt=physics_dt, base=0.0)
+    ledger.refresh(_desired(_spec("nav", 0.1)))
+    (nav,) = ledger.channels.values()
+    beats = 0
+    for _ in range(300):
+        ledger.advance(max(1, round(ledger.next_delta() / physics_dt)) * physics_dt)
+        hard_due = [ch for ch in ledger.due() if ch.hard]
+        if ledger.waiting(hard_due):
+            ledger.observe(nav, ledger.now)
+            beats += 1
+        ledger.complete(hard_due)
+    assert ledger.now / beats < 0.1 + 1.5 * physics_dt
+    assert ledger.counts[nav.topic].due == pytest.approx(beats, abs=1)

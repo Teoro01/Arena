@@ -1,6 +1,7 @@
 """colcon build wrapper: package-skip and cmake-args logic for the workspace."""
 
 import os
+import shutil
 import sys
 from typing import NamedTuple
 
@@ -87,6 +88,13 @@ def _recursive_mtime(path: str) -> int:
     return int(best)
 
 
+def _changed_build_type(build_dir: str, build_type: str) -> bool:
+    """Whether build_dir holds the leftovers of the other build type, whose installed symlinks block a symlink-install."""
+    if build_type.rsplit(".", 1)[-1] in ("ament_python", "python"):
+        return os.path.isfile(os.path.join(build_dir, "CMakeCache.txt"))
+    return os.path.isfile(os.path.join(build_dir, "colcon_command_prefix_setup_py.sh"))
+
+
 def _mount_point(path: str) -> str:
     path = os.path.realpath(path)
     while not os.path.ismount(path):
@@ -157,6 +165,11 @@ def build_main(argv: list[str]) -> int:
 
             if not up_to_date:
                 build_packages.append(package)
+                build_type = fields[2].strip("()") if len(fields) > 2 else ""
+                if package and _changed_build_type(os.path.join(ws.build_base, package), build_type):
+                    for tree in (os.path.join(ws.build_base, package), os.path.join(ws.install_base, package)):
+                        print(f"CLEANING: {package} changed its build type to {build_type}, rm -rf {tree}", flush=True)
+                        shutil.rmtree(tree, ignore_errors=True)
 
         if not build_packages:
             print("BUILDING: nothing stale, every package is up to date")

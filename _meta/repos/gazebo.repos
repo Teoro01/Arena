@@ -7,6 +7,10 @@ repositories:
     type: git
     url: https://github.com/voshch/gz-sim.git
     version: bone-transforms
+  tools/gz-rendering:
+    type: git
+    url: https://github.com/voshch/gz-rendering.git
+    version: shared-fullscreen-datablock
   # gazebo/ros_gz:
   #   type: git
   #   url: https://github.com/voshch/ros_gz.git

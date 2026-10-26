@@ -5,6 +5,7 @@ import os
 import pathlib
 import socket
 import subprocess
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -72,6 +73,11 @@ def releases(ws: pathlib.Path) -> pathlib.Path:
     return ws / "build" / ".forks" / "releases"
 
 
+def age(release: pathlib.Path) -> None:
+    old = time.time() - 2 * fork._PRUNE_GRACE_S
+    os.utime(release / "release.json", (old, old))
+
+
 def same_inode(a: pathlib.Path, b: pathlib.Path) -> bool:
     return os.path.samestat(os.lstat(a), os.lstat(b))
 
@@ -88,9 +94,9 @@ def test_freeze_hardlinks_files_unchanged_since_previous_release(tmp_path: pathl
     src, prev, dst = tmp_path / "src", tmp_path / "prev", tmp_path / "dst"
     write(src / "same.txt", "same\n")
     write(src / "edited.txt", "new content\n")
-    fork._freeze(str(src), str(prev), None, fork._walk(str(src)), lambda rel: False)
+    fork._freeze(str(src), str(prev), None, fork._walk(str(src)), lambda rel: False, True)
     write(src / "edited.txt", "newer content, longer\n")
-    part = fork._freeze(str(src), str(dst), str(prev), fork._walk(str(src)), lambda rel: False)
+    part = fork._freeze(str(src), str(dst), str(prev), fork._walk(str(src)), lambda rel: False, True)
     assert same_inode(dst / "same.txt", prev / "same.txt")
     assert not same_inode(dst / "edited.txt", prev / "edited.txt")
     assert (dst / "edited.txt").read_text() == "newer content, longer\n"
@@ -100,12 +106,34 @@ def test_freeze_hardlinks_files_unchanged_since_previous_release(tmp_path: pathl
 def test_freeze_detects_same_size_edit_by_content(tmp_path: pathlib.Path) -> None:
     src, prev, dst = tmp_path / "src", tmp_path / "prev", tmp_path / "dst"
     write(src / "f.txt", "aaaa\n")
-    fork._freeze(str(src), str(prev), None, fork._walk(str(src)), lambda rel: False)
+    fork._freeze(str(src), str(prev), None, fork._walk(str(src)), lambda rel: False, True)
     write(src / "f.txt", "bbbb\n")
     os.utime(src / "f.txt", ns=(0, 0))
-    part = fork._freeze(str(src), str(dst), str(prev), fork._walk(str(src)), lambda rel: False)
+    part = fork._freeze(str(src), str(dst), str(prev), fork._walk(str(src)), lambda rel: False, True)
     assert (dst / "f.txt").read_text() == "bbbb\n"
     assert part.changed == 1
+
+
+def test_freeze_by_mtime_carries_a_touched_stamp_newer_than_its_sources(tmp_path: pathlib.Path) -> None:
+    src, prev, dst = tmp_path / "src", tmp_path / "prev", tmp_path / "dst"
+    write(src / "venv_build.stamp", "")
+    os.utime(src / "venv_build.stamp", ns=(10**18, 10**18))
+    fork._freeze(str(src), str(prev), None, fork._walk(str(src)), lambda rel: False, False)
+    os.utime(src / "venv_build.stamp", ns=(2 * 10**18, 2 * 10**18))
+    part = fork._freeze(str(src), str(dst), str(prev), fork._walk(str(src)), lambda rel: False, False)
+    assert not same_inode(dst / "venv_build.stamp", prev / "venv_build.stamp")
+    assert (dst / "venv_build.stamp").stat().st_mtime_ns == 2 * 10**18
+    assert part.changed == 1
+
+
+def test_freeze_by_content_links_a_touched_unchanged_file(tmp_path: pathlib.Path) -> None:
+    src, prev, dst = tmp_path / "src", tmp_path / "prev", tmp_path / "dst"
+    write(src / "weights.yaml", "w\n")
+    fork._freeze(str(src), str(prev), None, fork._walk(str(src)), lambda rel: False, True)
+    os.utime(src / "weights.yaml", ns=(2 * 10**18, 2 * 10**18))
+    part = fork._freeze(str(src), str(dst), str(prev), fork._walk(str(src)), lambda rel: False, True)
+    assert same_inode(dst / "weights.yaml", prev / "weights.yaml")
+    assert part.changed == 0
 
 
 def test_freeze_links_source_where_asked_and_recreates_symlinks(tmp_path: pathlib.Path) -> None:
@@ -113,7 +141,7 @@ def test_freeze_links_source_where_asked_and_recreates_symlinks(tmp_path: pathli
     write(src / "venv" / "lib.so", "lib\n")
     write(src / "plain.txt", "plain\n")
     (src / "link").symlink_to("plain.txt")
-    part = fork._freeze(str(src), str(dst), None, fork._walk(str(src)), lambda rel: rel.startswith("venv"))
+    part = fork._freeze(str(src), str(dst), None, fork._walk(str(src)), lambda rel: rel.startswith("venv"), True)
     assert same_inode(dst / "venv" / "lib.so", src / "venv" / "lib.so")
     assert not same_inode(dst / "plain.txt", src / "plain.txt")
     assert os.readlink(dst / "link") == "plain.txt"
@@ -123,9 +151,9 @@ def test_freeze_links_source_where_asked_and_recreates_symlinks(tmp_path: pathli
 def test_freeze_without_destination_only_counts(tmp_path: pathlib.Path) -> None:
     src, prev = tmp_path / "src", tmp_path / "prev"
     write(src / "f.txt", "f\n")
-    fork._freeze(str(src), str(prev), None, fork._walk(str(src)), lambda rel: False)
+    fork._freeze(str(src), str(prev), None, fork._walk(str(src)), lambda rel: False, True)
     write(src / "g.txt", "g\n")
-    part = fork._freeze(str(src), None, str(prev), fork._walk(str(src)), lambda rel: False)
+    part = fork._freeze(str(src), None, str(prev), fork._walk(str(src)), lambda rel: False, True)
     assert (part.files, part.changed) == (2, 1)
     assert sorted(os.listdir(tmp_path)) == ["prev", "src"]
 
@@ -135,7 +163,7 @@ def test_freeze_leaves_pycache_and_git_out_of_counts(tmp_path: pathlib.Path) -> 
     write(src / "__pycache__" / "m.pyc", "c\n")
     write(src / ".git" / "HEAD", "ref\n")
     write(src / "m.py", "m\n")
-    part = fork._freeze(str(src), str(tmp_path / "dst"), None, fork._walk(str(src)), lambda rel: False)
+    part = fork._freeze(str(src), str(tmp_path / "dst"), None, fork._walk(str(src)), lambda rel: False, True)
     assert (part.files, part.changed) == (1, 1)
     assert (tmp_path / "dst" / "__pycache__" / "m.pyc").is_file()
 
@@ -188,6 +216,7 @@ def test_release_freezes_every_part_and_reuses_a_matching_release(ws: pathlib.Pa
 
 def test_release_after_edit_links_unchanged_files_and_prunes_the_unused_parent(ws: pathlib.Path) -> None:
     first = fork._release()
+    age(releases(ws) / first)
     write(ws / "src" / "Arena" / "pkg" / "a.py", "a = 10\n")
     second = fork._release()
     assert second != first
@@ -198,6 +227,17 @@ def test_release_after_edit_links_unchanged_files_and_prunes_the_unused_parent(w
     assert os.stat(rel / "src" / "Arena" / "pkg" / "b.py").st_nlink == 1
     assert fork._release_ids() == [second]
     assert fork._latest() == second
+
+
+def test_prune_keeps_a_fresh_unused_release_and_drops_it_once_aged(ws: pathlib.Path) -> None:
+    first = fork._release()
+    write(ws / "src" / "Arena" / "pkg" / "a.py", "a = 10\n")
+    second = fork._release()
+    assert fork._release_ids() == [first, second]
+    age(releases(ws) / first)
+    with fork._releases_lock():
+        fork._prune()
+    assert fork._release_ids() == [second]
 
 
 def test_release_after_edit_shares_inodes_with_a_parent_a_fork_holds(ws: pathlib.Path) -> None:
@@ -237,6 +277,7 @@ def test_release_follows_a_new_commit(ws: pathlib.Path) -> None:
 
 def test_release_clears_an_abandoned_freeze(ws: pathlib.Path) -> None:
     first = fork._release()
+    age(releases(ws) / first)
     write(releases(ws) / ".tmp-20200101-000000" / "src" / "half.txt", "half\n")
     write(ws / "src" / "Arena" / "pkg" / "a.py", "a = 10\n")
     second = fork._release()

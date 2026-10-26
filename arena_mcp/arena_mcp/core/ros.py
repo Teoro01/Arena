@@ -164,6 +164,9 @@ class Ros:
         self._closing = True
         with contextlib.suppress(Exception):
             self._executor.shutdown(timeout_sec=2.0)
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
         with contextlib.suppress(Exception):
             self._node.destroy_node()
         with contextlib.suppress(Exception):

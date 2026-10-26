@@ -316,14 +316,16 @@ URDF frame before `robot_state_publisher` sees them, via `rviz_utils/hri/rig.py`
   spread of the lumped waist is retired), head DOFs over neck plus head, ankles on the
   Foot bones, wrists on the Hand bones. Axes come from the measured-probe procedure, not eyeballing.
   `ExternalPoseProvider` replaces mapped bones with the wire pose instead of composing
-  it over the walking clip. Each tick the ped stands on its lowest sole point: the
+  it over the walking clip. Its neutral legs are the skin's bind rest with thigh and
+  shank swung to hang straight down under the hip socket and the foot keeping its bind
+  orientation, the contract's wire zero. Each tick the ped stands on its lowest sole point: the
   converter stores a heel and a toe point per foot in `meta.json` (`soles`), and the
   root z is set so the lowest of them is at the floor. Rigs on wheels have none and keep
   the actor SDF ground offset. MuJoCo and Gazebo plant the same way.
 - **Gazebo**: `arena_gz_plugins` `PedSkeletonPlugin` renders the wire `joint_state`
   per bone through `utils/msgs/arena_people_msgs/bone_map.json` (the JSON twin of
   `BONE_MAP`, kept equal by `test_bone_map_parity.py`) onto the bundle's neutral
-  stance (first frame of its `neutral` clip, else of its `idle` clip, with the legs at
-  the skin's bind rest), via the
+  stance (first frame of its `neutral` clip, else of its `idle` clip, with the legs
+  hanging straight down from the skin's bind rest), via the
   `BoneTransforms` actor component of the gz-sim overlay. Without the overlay or the
   bone map it follows `animation_state`/pose and scrubs the walk clip.

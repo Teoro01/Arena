@@ -22,18 +22,18 @@ signals:
   r_r_shoulder: {mean: -2.08}
   l_elbow: {mean: 0.272}
   r_elbow: {mean: 0.272}
-  l_y_hip: {mean: 0.09}
-  r_y_hip: {mean: -0.09}
-  l_p_hip: {mean: -0.12}
-  r_p_hip: {mean: -0.12}
-  l_r_hip: {mean: 1.5}
-  r_r_hip: {mean: 1.5}
-  l_knee: {mean: -1.22}
-  r_knee: {mean: -1.22}
-  l_y_ankle: {mean: -0.5}
-  r_y_ankle: {mean: 0.5}
-  l_ankle: {mean: -0.05}
-  r_ankle: {mean: -0.05}
+  l_y_hip: {mean: -0.0035}
+  r_y_hip: {mean: 0.0035}
+  l_p_hip: {mean: -0.0316}
+  r_p_hip: {mean: -0.0316}
+  l_r_hip: {mean: 1.572}
+  r_r_hip: {mean: 1.572}
+  l_knee: {mean: -1.3178}
+  r_knee: {mean: -1.3178}
+  l_y_ankle: {mean: -0.4075}
+  r_y_ankle: {mean: 0.4075}
+  l_ankle: {mean: -0.0862}
+  r_ankle: {mean: -0.0862}
 joints:
   waist: {signal: waist, shift: 0.0}
   spine: {signal: spine, shift: 0.0}

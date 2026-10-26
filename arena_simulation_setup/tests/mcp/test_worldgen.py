@@ -209,7 +209,8 @@ async def main():
     node.create_service(QueueEpisode, "/worldgen_test/env_7/task_generator_node/config/queue_episode", serve)
     executor = SingleThreadedExecutor()
     executor.add_node(node)
-    threading.Thread(target=executor.spin, daemon=True).start()
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
     try:
         for _ in range(50):
             if "/worldgen_test/env_7/task_generator_node" in (await ROS.graph())["nodes"]:
@@ -238,6 +239,7 @@ async def main():
         }))
     finally:
         executor.shutdown()
+        spin_thread.join()
         node.destroy_node()
         await ROS.shutdown()
 

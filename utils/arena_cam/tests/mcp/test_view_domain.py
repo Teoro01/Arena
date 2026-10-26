@@ -155,6 +155,11 @@ def rig():
     thread.start()
     loop = asyncio.new_event_loop()
     try:
+        from arena_runtime_msgs.msg import EnvRegistry
+        from task_generator_msgs.msg import RobotFleet
+
+        loop.run_until_complete(ROS.latest(EnvRegistry, "/arena/state/envs", timeout=30.0))
+        loop.run_until_complete(ROS.latest(RobotFleet, f"{tg}/state/robots", timeout=30.0))
         yield Rig(loop=loop, tg=tg, arena=arena)
     finally:
         executor.shutdown()

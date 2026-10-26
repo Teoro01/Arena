@@ -193,7 +193,10 @@ class GateLedger:
     def complete(self, channels: Iterable[Channel]) -> None:
         gated = False
         for ch in channels:
-            ch.next_due += ch.period
+            if ch.hard and ch.latest_stamp is not None and ch.latest_stamp + ch.period > self.now:
+                ch.next_due = ch.latest_stamp + ch.period
+            else:
+                ch.next_due += ch.period
             self.counts[ch.topic].due += 1
             gated = gated or ch.hard
         if gated:
