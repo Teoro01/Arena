@@ -239,19 +239,43 @@ def test_obstacle_affordance_slots_are_empty_for_an_unresolvable_model(bench_ass
     assert asyncio.run(Obstacle.parse({"name": "ghost", "model": "Hospital/TestMissingSeat", "pose": [0.0, 0.0, 0.0]}).affordance_slots()) == []
 
 
-def test_obstacle_joints_take_a_state_name_or_joint_values_and_serialize_back():
+@pytest.mark.parametrize(
+    "joints",
+    [
+        "open",
+        0.5,
+        {"door": 1.0, "drawer": "open"},
+        {"openness": {"door": 0.5}, "setting": {"dial": "high"}, "pos": {"knob": 0.25}, "q": {"wheel": -1.0}},
+    ],
+)
+def test_obstacle_joints_keep_each_form_and_serialize_it_back(joints):
+    obstacle = Obstacle.parse({"name": "cabinet", "model": "cabinet", "pose": [0.0, 0.0, 0.0], "joints": joints})
+    assert obstacle.joints == joints
+    assert obstacle.serialize()["joints"] == joints
+    assert Obstacle.parse(obstacle.serialize()).joints == joints
+
+
+def test_obstacle_joints_read_integers_as_floats_and_default_to_none():
     base = {"name": "cabinet", "model": "cabinet", "pose": [0.0, 0.0, 0.0]}
-    by_state = Obstacle.parse({**base, "joints": "open"})
-    by_value = Obstacle.parse({**base, "joints": {"door": 1, "drawer": "open"}})
-    assert by_state.joints == "open"
-    assert by_value.joints == {"door": 1.0, "drawer": "open"}
-    assert by_value.serialize()["joints"] == {"door": 1.0, "drawer": "open"}
-    assert Obstacle.parse(by_value.serialize()).joints == by_value.joints
+    assert Obstacle.parse({**base, "joints": 1}).joints == 1.0
+    assert Obstacle.parse({**base, "joints": {"door": 1}}).joints == {"door": 1.0}
+    assert Obstacle.parse({**base, "joints": {"q": {"door": 1}}}).joints == {"q": {"door": 1.0}}
     assert Obstacle.parse(base).joints is None
     assert "joints" not in Obstacle.parse(base).serialize()
 
 
-@pytest.mark.parametrize(("joints", "message"), [([1.0], "joints must be a state name or a mapping"), ({"door": True}, "joint 'door' takes a number or a state name")])
+@pytest.mark.parametrize(
+    ("joints", "message"),
+    [
+        ([1.0], "joints must be a state name, an openness in \\[0, 1\\], a mapping of joint names to values or state names, or a mapping of families \\(openness, pos, setting, q\\)"),
+        (True, "joints must be a state name"),
+        (1.5, "joints as a number is an openness in \\[0, 1\\], got 1.5"),
+        ({"door": True}, "joint 'door' takes a number or a state name"),
+        ({"openness": {"door": 0.5}, "lid": 1.0}, "joints mixes family keys \\['openness'\\] with joint names"),
+        ({"openness": 0.5}, "joints family openness maps its joints to fractions, detent names or values, got 0.5"),
+        ({"setting": {"dial": None}}, "joint 'dial' takes a number or a state name"),
+    ],
+)
 def test_obstacle_joints_refuse_other_values(joints, message):
     with pytest.raises(ValueError, match=message):
         Obstacle.parse({"name": "cabinet", "model": "cabinet", "pose": [0.0, 0.0, 0.0], "joints": joints})

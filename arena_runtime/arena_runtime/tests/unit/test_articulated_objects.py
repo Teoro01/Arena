@@ -25,11 +25,23 @@ CABINET = {
     "states": {"closed": {"door": 0.0, "drawer": 0.0}, "open": {"door": 1.5, "drawer": 0.4}},
     "swept": [[-0.5, 0.52], [-1.32, 0.3], [0.0, 1.0]],
 }
+CONSOLE = {
+    "links": {"base": ["base"], "door": [], "drawer": [], "knob": [], "wheel": [], "dial": []},
+    "joints": [
+        {"name": "door", "type": "revolute", "parent": "base", "child": "door", "limit": [0.0, 1.6]},
+        {"name": "drawer", "type": "prismatic", "parent": "base", "child": "drawer", "axis": [0, -1, 0], "limit": [0.0, 0.4]},
+        {"name": "knob", "type": "revolute", "parent": "base", "child": "knob", "limit": [0.0, 2.0]},
+        {"name": "wheel", "type": "continuous", "parent": "base", "child": "wheel"},
+        {"name": "dial", "type": "revolute", "parent": "base", "child": "dial", "limit": [0.0, 3.0]},
+    ],
+    "states": {"closed": {"door": 0.0, "drawer": 0.0}, "open": {"door": 1.5, "drawer": 0.4}},
+    "detents": {"dial": {"off": 0.0, "low": 1.0, "high": 2.0}},
+}
 
 
 @pytest.fixture
 def assets(tmp_path: Path):
-    """Asset root with one articulated cabinet and one rigid crate, the model names unique per test."""
+    """Asset root with an articulated cabinet and console and one rigid crate, the model names unique per test."""
     from arena_simulation_setup.tree import DynamicPaths
 
     suffix = uuid.uuid4().hex[:8]
@@ -38,12 +50,16 @@ def assets(tmp_path: Path):
         (cabinet / "links" / link).mkdir(parents=True)
         (cabinet / "links" / link / "annotation.yaml").write_text(yaml.safe_dump({"bounding_box": box}))
     (cabinet / "annotation.yaml").write_text(yaml.safe_dump({"bounding_box": CABINET_LINKS["body"], "articulation": CABINET}))
+    console = tmp_path / "Kitchen" / "Object" / f"Console{suffix}"
+    (console / "links" / "base").mkdir(parents=True)
+    (console / "links" / "base" / "annotation.yaml").write_text(yaml.safe_dump({"bounding_box": CABINET_LINKS["body"]}))
+    (console / "annotation.yaml").write_text(yaml.safe_dump({"bounding_box": CABINET_LINKS["body"], "articulation": CONSOLE}))
     crate = tmp_path / "Kitchen" / "Object" / f"Crate{suffix}"
     crate.mkdir(parents=True)
     (crate / "annotation.yaml").write_text(yaml.safe_dump({"bounding_box": [[-0.2, 0.2], [-0.2, 0.2], [0.0, 0.4]]}))
     previous = DynamicPaths.ARENA.path
     DynamicPaths.ARENA.path = tmp_path
-    yield {"cabinet": f"Kitchen/Cabinet{suffix}", "crate": f"Kitchen/Crate{suffix}"}
+    yield {"cabinet": f"Kitchen/Cabinet{suffix}", "console": f"Kitchen/Console{suffix}", "crate": f"Kitchen/Crate{suffix}"}
     DynamicPaths.ARENA.path = previous
 
 
@@ -324,7 +340,7 @@ def test_an_agent_in_the_swing_holds_the_object_until_it_leaves(assets, on_dummy
         await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"])])
         sim.calls.clear()
         _place(sim, frame, 0.2, -1.2, stamp=1)
-        assert sim.set_semantic_value("env_0/cabinet", "door", "1.5")
+        assert sim.set_semantic_value("env_0/cabinet", "q.door", "1.5")
         runtime = sim._articulated["cabinet"]
         for _ in range(8):
             await shim._tick(sim, DT)
@@ -350,17 +366,25 @@ def test_semantic_writes_take_state_names_and_clamped_joint_values(assets, on_du
         await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"])])
         snapshot = _snapshot(sim)
         assert snapshot.discrete == {"state": "closed", "target": "closed"}
-        assert snapshot.continuous == {"door": 0.0, "drawer": 0.0, "knob": 0.0}
+        assert snapshot.continuous == {"openness.door": 0.0, "openness.drawer": 0.0, "angle.knob": 0.0, "q.door": 0.0, "q.drawer": 0.0, "q.knob": 0.0}
         assert snapshot.predicates == {"closed": True, "open": False, "moving": False, "blocked": False}
         runtime = sim._articulated["cabinet"]
-        assert sim.set_semantic_value("env_0/cabinet", "drawer", "9")
+        assert sim.set_semantic_value("env_0/cabinet", "q.drawer", "9")
         assert runtime.target == {"door": 0.0, "drawer": 0.4, "knob": 0.0}
         assert sim.set_semantic_value("env_0/cabinet", "target", "open")
         assert runtime.target == {"door": 1.5, "drawer": 0.4, "knob": 0.0}
-        assert sim.set_semantic_value("env_0/cabinet", "knob", str(3 * math.pi / 2))
+        assert sim.set_semantic_value("env_0/cabinet", "q.knob", str(3 * math.pi / 2))
         assert runtime.target["knob"] == pytest.approx(-math.pi / 2)
         assert _snapshot(sim).discrete == {"state": "closed", "target": "open"}
-        for field, value, reason in (("target", "ajar", "malformed value"), ("drawer", "wide", "malformed value"), ("drawer", "nan", "malformed value"), ("lid", "1.0", "field not writable"), ("moving", "true", "field not writable")):
+        for field, value, reason in (
+            ("target", "ajar", "malformed value"),
+            ("q.drawer", "wide", "malformed value"),
+            ("q.drawer", "nan", "malformed value"),
+            ("door", "1.0", "field not writable"),
+            ("q.lid", "1.0", "field not writable"),
+            ("angle.knob", "1.0", "field not writable"),
+            ("moving", "true", "field not writable"),
+        ):
             with pytest.raises(ValueError, match=reason):
                 sim.set_semantic_value("env_0/cabinet", field, value)
         assert runtime.target == {"door": 1.5, "drawer": 0.4, "knob": pytest.approx(-math.pi / 2)}
@@ -442,8 +466,106 @@ def test_a_timeline_set_drives_the_object_and_the_judge_reads_its_state(assets, 
         for _ in range(8):
             await shim._tick(sim, DT)
         assert holds("cabinet.state == open")
-        assert holds("cabinet.door == 1.5")
+        assert node._semantic_value("cabinet", "q.door") == "1.5"
+        assert node._semantic_value("cabinet", "openness.door") == "1.0"
         assert holds("cabinet.moving == false")
+
+    on_dummy_sim(body)
+
+
+def _console_semantics(model: str):
+    from arena_runtime.sim._articulation import resolve_articulated
+    from arena_runtime.sim._semantics import ArticulatedSemantics
+
+    runtime = asyncio.run(resolve_articulated(_obstacle("console", model), "env_0/console"))
+    assert runtime is not None
+    return runtime, ArticulatedSemantics("env_0/console", runtime)
+
+
+def test_the_snapshot_reads_each_joint_in_its_family(assets):
+    runtime, semantics = _console_semantics(assets["console"])
+    snapshot = semantics.snapshot()
+    assert snapshot.discrete == {"state": "closed", "target": "closed", "setting.dial": "off"}
+    assert snapshot.continuous == {
+        "openness.door": 0.0,
+        "openness.drawer": 0.0,
+        "pos.dial": 0.0,
+        "pos.knob": 0.0,
+        "angle.wheel": 0.0,
+        "q.dial": 0.0,
+        "q.door": 0.0,
+        "q.drawer": 0.0,
+        "q.knob": 0.0,
+        "q.wheel": 0.0,
+    }
+    assert snapshot.predicates == {"closed": True, "open": False, "moving": False, "blocked": False}
+    runtime.current = {"door": 0.75, "drawer": 0.1, "knob": 1.5, "wheel": -math.pi / 2, "dial": 1.0}
+    snapshot = semantics.snapshot()
+    assert snapshot.discrete == {"state": "", "target": "closed", "setting.dial": "low"}
+    assert snapshot.continuous == pytest.approx(
+        {
+            "openness.door": 0.5,
+            "openness.drawer": 0.25,
+            "pos.dial": 1.0 / 3.0,
+            "pos.knob": 0.75,
+            "angle.wheel": 3 * math.pi / 2,
+            "q.dial": 1.0,
+            "q.door": 0.75,
+            "q.drawer": 0.1,
+            "q.knob": 1.5,
+            "q.wheel": -math.pi / 2,
+        }
+    )
+    assert all(semantics.has_field(field) for field in (*snapshot.discrete, *snapshot.continuous, *snapshot.predicates, "openness"))
+    assert not semantics.has_field("door")
+    assert not semantics.is_continuous("setting.dial") and not semantics.is_continuous("state") and not semantics.is_continuous("target")
+    assert all(semantics.is_continuous(field) for field in snapshot.continuous)
+
+
+def test_changes_fire_at_the_family_quanta(assets):
+    from arena_runtime.sim._semantics import _diff
+
+    runtime, semantics = _console_semantics(assets["console"])
+    previous = semantics.snapshot()
+    runtime.current = {"door": 0.006, "drawer": 0.0008, "knob": 0.0, "wheel": 0.004, "dial": 0.0}
+    snapshot = semantics.snapshot()
+    assert {change.field for change in _diff(previous, snapshot, semantics.quantum)} == {"q.door", "q.drawer", "state", "closed", "moving"}
+    previous = snapshot
+    runtime.current = {"door": 0.03, "drawer": 0.0008, "knob": 0.0, "wheel": 0.007, "dial": 0.012}
+    changes = {change.field: change for change in _diff(previous, semantics.snapshot(), semantics.quantum)}
+    assert set(changes) == {"openness.door", "q.door", "angle.wheel", "q.wheel", "q.dial", "setting.dial"}
+    assert (changes["setting.dial"].previous, changes["setting.dial"].current) == ("off", "")
+
+
+def test_family_writes_drive_the_target_and_a_detent_snaps(assets, on_dummy_sim):
+    from arena_runtime.sim import _mechanism_shim as shim
+
+    async def body(sim):
+        await sim.spawn_objects([_obstacle("console", assets["console"])])
+        runtime = sim._articulated["console"]
+        assert sim.set_semantic_value("env_0/console", "openness", "0.5")
+        assert runtime.target == pytest.approx({"door": 0.75, "drawer": 0.2, "knob": 0.0, "wheel": 0.0, "dial": 0.0})
+        assert sim.set_semantic_value("env_0/console", "setting.dial", "high")
+        assert sim.set_semantic_value("env_0/console", "pos.knob", "0.25")
+        assert runtime.target == pytest.approx({"door": 0.75, "drawer": 0.2, "knob": 0.5, "wheel": 0.0, "dial": 2.0})
+        for _ in range(8):
+            await shim._tick(sim, DT)
+        snapshot = _snapshot(sim, "env_0/console")
+        assert snapshot.discrete["setting.dial"] == "high"
+        assert (snapshot.continuous["openness.door"], snapshot.continuous["openness.drawer"], snapshot.continuous["pos.knob"]) == pytest.approx((0.5, 0.5, 0.25))
+        assert not snapshot.predicates["moving"]
+        for field, value, reason in (
+            ("openness", "1.5", "malformed value"),
+            ("openness.door", "half", "malformed value"),
+            ("setting.dial", "max", "malformed value"),
+            ("pos.knob", "nan", "malformed value"),
+            ("setting.knob", "off", "field not writable"),
+            ("openness.knob", "0.5", "field not writable"),
+            ("angle.wheel", "1.0", "field not writable"),
+        ):
+            with pytest.raises(ValueError, match=reason):
+                sim.set_semantic_value("env_0/console", field, value)
+        assert runtime.target == pytest.approx({"door": 0.75, "drawer": 0.2, "knob": 0.5, "wheel": 0.0, "dial": 2.0})
 
     on_dummy_sim(body)
 

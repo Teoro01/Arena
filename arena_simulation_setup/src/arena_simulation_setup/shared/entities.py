@@ -12,6 +12,7 @@ from typing_extensions import Self
 
 from arena_simulation_setup.tree.assets.Human import HumanIdentifier
 from arena_simulation_setup.tree.assets.Object import ObjectIdentifier
+from arena_simulation_setup.utils.articulation import FAMILIES, WRITABLE_FAMILIES
 from arena_simulation_setup.utils.cattrs import (
     ArenaConverter,
     Parseable,
@@ -176,22 +177,38 @@ def _humansim_object(value: Mapping[str, object] | None) -> dict:
     return value
 
 
-Joints = str | dict[str, float | str] | None
+JointValue = float | str
+Joints = str | float | dict[str, JointValue] | dict[str, dict[str, JointValue]] | None
+JOINTS_FORMS = f'a state name, an openness in [0, 1], a mapping of joint names to values or state names, or a mapping of families ({", ".join(WRITABLE_FAMILIES)}) to mappings of their joints to fractions, detent names or values'
+
+
+def _joint_value(joint: object, position: object) -> JointValue:
+    if isinstance(position, str):
+        return position
+    if isinstance(position, (int, float)) and not isinstance(position, bool):
+        return float(position)
+    raise ValueError(f'joint {joint!r} takes a number or a state name, got {position!r}')
 
 
 def _joints(value: object) -> Joints:
     if value is None or isinstance(value, str):
         return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f'joints as a number is an openness in [0, 1], got {value!r}')
+        return float(value)
     if not isinstance(value, Mapping):
-        raise ValueError(f'joints must be a state name or a mapping of joint names to values or state names, got {value!r}')
-    joints: dict[str, float | str] = {}
-    for joint, position in value.items():
-        if isinstance(position, str):
-            joints[str(joint)] = position
-        elif isinstance(position, (int, float)) and not isinstance(position, bool):
-            joints[str(joint)] = float(position)
-        else:
-            raise ValueError(f'joint {joint!r} takes a number or a state name, got {position!r}')
+        raise ValueError(f'joints must be {JOINTS_FORMS}, got {value!r}')
+    families = {str(key) for key in value} & set(FAMILIES)
+    if families and len(families) != len(value):
+        raise ValueError(f'joints mixes family keys {sorted(families)} with joint names, use one or the other: {JOINTS_FORMS}')
+    if not families:
+        return {str(joint): _joint_value(joint, position) for joint, position in value.items()}
+    joints: dict[str, dict[str, JointValue]] = {}
+    for family, members in value.items():
+        if not isinstance(members, Mapping):
+            raise ValueError(f'joints family {family} maps its joints to fractions, detent names or values, got {members!r}')
+        joints[str(family)] = {str(joint): _joint_value(joint, position) for joint, position in members.items()}
     return joints
 
 

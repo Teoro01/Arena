@@ -1022,12 +1022,15 @@ class ArticulatedSemantics(SemanticKind):
 
     DISCRETE = ('state', 'target')
     PREDICATES = ('moving', 'blocked')
-    JOINT_QUANTA: ClassVar[dict[str, float]] = {'revolute': 0.1, 'continuous': 0.1, 'prismatic': 0.05}
+    FAMILY_QUANTA: ClassVar[dict[str, float]] = {'openness': 0.01, 'pos': 0.01, 'angle': 0.01}
+    Q_QUANTA: ClassVar[dict[str, float]] = {'revolute': 0.01, 'continuous': 0.01, 'prismatic': 0.001}
 
     def __init__(self, entity: str, runtime: ArticulatedObject) -> None:
         articulation = runtime.articulation
-        super().__init__(entity, self.DISCRETE, tuple(joint.name for joint in articulation.movable), (*articulation.states, *self.PREDICATES))
+        continuous, discrete = articulation.fields(articulation.initial())
+        super().__init__(entity, (*self.DISCRETE, *discrete), tuple(continuous), (*articulation.states, *self.PREDICATES))
         self._runtime = runtime
+        self._writable = articulation.writable_fields()
 
     @classmethod
     def attach(cls, mech: MechanismITF, entity: str, cfgs: Sequence[SemanticCfg], *, polygon: Sequence[tuple[float, float]] | None = None) -> SemanticKind:
@@ -1037,45 +1040,38 @@ class ArticulatedSemantics(SemanticKind):
         return cls(entity, runtime)
 
     def has_field(self, field: str) -> bool:
-        return field in self._discrete or field in self._continuous or field in self._predicates
+        return field in self._discrete or field in self._continuous or field in self._predicates or field in self._writable
 
     @classmethod
     def is_continuous(cls, field: str) -> bool:
-        """Every state field but `state` and `target` is a joint value."""
-        return field not in cls.DISCRETE
+        """Every state field but `state`, `target` and the `setting.` detents is a number."""
+        return field not in cls.DISCRETE and not field.startswith('setting.')
 
     def quantum(self, field: str) -> float:
-        joint = self._runtime.articulation.joint_map.get(field)
-        return self.JOINT_QUANTA.get(str(joint.type), 1.0) if joint is not None else 1.0
+        family, _, name = field.partition('.')
+        if family in self.FAMILY_QUANTA:
+            return self.FAMILY_QUANTA[family]
+        joint = self._runtime.articulation.joint_map.get(name) if family == 'q' else None
+        return self.Q_QUANTA.get(str(joint.type), 1.0) if joint is not None else 1.0
 
     def reset(self) -> None:
         self._runtime.reset()
 
     def set_value(self, field: str, value: str) -> None:
-        """Write `target` (a state name, the joints it names move there) or one joint's target value, clamped."""
-        runtime = self._runtime
-        token = value.strip()
-        if field == 'target':
-            try:
-                runtime.target = runtime.articulation.resolve(token, base=runtime.target)
-            except ValueError:
-                raise ValueError('malformed value') from None
-            return
-        if field not in self._continuous:
+        """Write `target` (a state name), `openness` or a writable family field, the joints it moves get new targets."""
+        if field not in self._writable:
             raise ValueError('field not writable')
+        runtime = self._runtime
         try:
-            number = float(token)
+            runtime.target = runtime.articulation.target_for(field, value, runtime.target)
         except ValueError:
             raise ValueError('malformed value') from None
-        if not math.isfinite(number):
-            raise ValueError('malformed value')
-        runtime.target = {**runtime.target, field: runtime.articulation.joint_map[field].clamp(number)}
 
     def snapshot(self) -> SemanticEntitySnapshot:
         runtime = self._runtime
         articulation = runtime.articulation
-        discrete = {'state': articulation.state_of(runtime.current), 'target': articulation.state_of(runtime.target)}
-        continuous = {joint: runtime.current[joint] for joint in self._continuous}
+        continuous, settings = articulation.fields(runtime.current)
+        discrete = {'state': articulation.state_of(runtime.current), 'target': articulation.state_of(runtime.target), **settings}
         predicates = {state: _at_state(runtime.current, values) for state, values in articulation.states.items()}
         predicates['moving'] = runtime.moving
         predicates['blocked'] = runtime.blocked

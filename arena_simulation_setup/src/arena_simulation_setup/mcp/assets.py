@@ -24,7 +24,7 @@ domain = Domain(
     """Resolvable Arena data of every kind `arena asset` moves (assets_kinds lists them) through the same code the `arena asset` verbs run.
     find and ls show what each resolver answers, pull fetches into the local cache, push publishes to the kind's bucket after the preflight that refuses unresolvable references.
     import_sources lists the upstream datasets `arena asset import` converts from, import_items one dataset's importable items, and import converts chosen items into the imported root as a job.
-    articulation shows the links, joints and named states of an articulated object, the values scenario objects take as `joints:`.""",
+    articulation shows the links, joints, named states, detents and field families of an articulated object, the values scenario objects take as `joints:`.""",
     check=_ready,
 )
 
@@ -96,7 +96,7 @@ def assets_push(
 
 @domain.tool(read_only=True, open_world=True)
 def assets_articulation(name: Annotated[str, Field(description="object name as a scenario's objects reference it, [domain/]name")]) -> dict[str, object]:
-    """Links, joints (type, parent, child, limits, speed), named states and swept box of an articulated object, or that the object is rigid."""
+    """Links, joints (type, parent, child, limits, speed), named states, detents, field families (family to member joints) and swept box of an articulated object, or that the object is rigid."""
     from arena_simulation_setup.tree.assets.Object import ObjectIdentifier
 
     try:
@@ -117,6 +117,8 @@ def assets_articulation(name: Annotated[str, Field(description="object name as a
         "links": [{"name": link, "nodes": nodes, "bundle": (view.path / "links" / link).is_dir()} for link, nodes in articulation.links.items()],
         "joints": [{**joint.unstructure(), "speed": joint.speed} for joint in articulation.joints],
         "states": articulation.states,
+        "detents": articulation.detents,
+        "families": {family: list(members) for family, members in articulation.families().items()},
         "initial": articulation.initial(),
         "swept": None if articulation.swept is None else [list(side) for side in articulation.swept],
     }

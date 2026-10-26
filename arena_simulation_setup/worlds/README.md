@@ -305,11 +305,15 @@ object annotation carries (see [AUTHORING.md](../AUTHORING.md#lights)), `scale: 
 `interaction_radius`, `formation`, `satisfies`, `seats`) that becomes its
 humansim `WorldObject` info. An articulated object (one whose annotation
 carries `articulation:`) takes `joints:`, its initial joint values at every
-episode start: a state name (`joints: open`) or joint values, each a number
-(radians or meters) or a state name naming that joint (`joints: {door: open,
-drawer: 0.2}`). Joints left out start at the `closed` state, else at 0 within
+episode start: a state name (`joints: open`), an openness in [0, 1] for every
+opening part (`joints: 0.5`), raw joint values, each a number (radians or
+meters) or a state name naming that joint (`joints: {door: open, drawer: 0.2}`),
+or values by family, a fraction for `openness` and `pos`, a detent name for
+`setting`, a raw value for `q` (`joints: {openness: {door: 1.0}, setting: {dial:
+high}}`). One mapping does not mix family keys and joint names. Joints left out start at the `closed` state, else at 0 within
 their limits. The same key applies to level `objects`. The
-`assets_articulation` MCP tool lists an object's joints and states, the
+`assets_articulation` MCP tool lists an object's joints, states, detents and
+field families, the
 [`articulated` semantic kind](../AUTHORING.md#articulated-objects) changes
 them during the episode. `humans` (`DynamicObstacle`) also takes
 `velocity` (m/s, default `1.0`), `waypoint_mode` (`repeat`, `reverse`, `once`,
@@ -388,8 +392,8 @@ conditions:
 | key | meaning |
 | --- | --- |
 | `op` | `always`, `never`, `eventually`, `before`, or `never_during` |
-| `p` | first atom, required |
-| `q` | second atom, required for `before`/`never_during`, rejected (parse error) with any other `op` |
+| `p` | first condition, a text atom or a structured node, required |
+| `q` | second condition, required for `before`/`never_during`, rejected (parse error) with any other `op` |
 | `text` | human-readable description, optional |
 
 An atom is one of these bare forms (no `env_N/` prefix): `<entity>.<field> ==
@@ -404,7 +408,51 @@ spaces).
 Every robot is also an entity of kind `robot` with the fields `phase`, `met`,
 `failed`, `dropped` and `violated`, so `robot_1.phase == 2` is a valid atom.
 A world entity (zone, door, elevator, schedule, sound) is named
-`<name>/<level>`, or `<name>` alone when no other level has one.
+`<name>/<level>`, or `<name>` alone when no other level has one. An object,
+of a level or of the scenario, is named as authored, and a scenario object
+takes the name over from a level object of the same name.
+An entity field test splits `<entity>.<field>` at the first dot, so dotted
+fields such as `fridge.openness.door == 1` work.
+
+Where a text atom fits, so does a structured node, written as YAML or JSON and
+saved back in the form it was read:
+
+| node | holds when |
+| --- | --- |
+| `{field: <entity>.<field>, <op>: <value>}` | the field compares true, `<op>` one of `eq`, `ne`, `lt`, `le`, `gt`, `ge`, or `within: [lo, hi]` (inclusive) |
+| `{some: <entity>.<family>, <op>: <value>}` | any member of the family compares true |
+| `{each: <entity>.<family>, <op>: <value>}` | every member compares true |
+| `{all: [<node>, ...]}`, `{any: [<node>, ...]}`, `{not: <node>}` | every, any, or not the inner node |
+| `{subject: s, in: zone}`, `{subject: s, near: other, radius: r}`, `{subject: s, sees: other, range: r}`, `{subject: s, plays: clip}` | as the text atoms of the same meaning |
+| a text string | as the text grammar, `a and b for 3 or c` included |
+
+Any node takes `for: <seconds>`: it holds once its inner node has held that
+long without a break. A family is every field named `<family>.<member>` of the
+entity, such as the `openness.<joint>` fields of an articulated object (see
+[AUTHORING.md](../AUTHORING.md#articulated-objects)), so a condition covers
+parts it does not name. An empty family makes `some` and `each` false. `eq`
+and `ne` compare numbers within 1e-6 and strings exactly, `le`, `ge` and
+`within` are inclusive within 1e-6 and `lt` and `gt` their complements, and
+`lt`, `le`, `gt`, `ge` and `within` take numbers only. A field or entity that
+is missing leaves a test unknown: `not` keeps unknown, `all` is false on any
+false and else unknown on any unknown, `any` is true on any true and else
+unknown on any unknown, an unknown resets a `for` timer, and a phase is never
+met on unknown. When the world resolves, loading the scenario and the MCP
+`worlds_scenario_validate` check every field and family a condition names,
+every object's `joints:` and every timeline `set` against the articulated
+objects of the scenario and its world. A timeline `when` takes a condition
+too.
+
+```yaml
+conditions:
+- {op: always, p: {each: chest.openness, le: 0.05}, text: "Keep the chest closed."}
+robots:
+- start: [1.0, 1.0, 0.0]
+  phases:
+  - {goto: kitchen, until: {some: fridge.openness, ge: 0.9, for: 2}}
+  - {until: {all: [{field: oven.setting.dial, eq: "off"}, "robot in kitchen"]}}
+```
+
 Clauses take an optional `on_failure` (`continue` by default, `stop_task`,
 `abort_episode`). Conditions are judged online at the node tick and replayed
 offline by arena_evaluation with the same code.

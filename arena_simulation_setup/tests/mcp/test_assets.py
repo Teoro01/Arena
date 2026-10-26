@@ -91,7 +91,7 @@ def object_root(tmp_path):
     DynamicPaths.ARENA.path = previous
 
 
-def test_articulation_lists_links_joints_states_and_swept_box(object_root):
+def test_articulation_lists_links_joints_states_detents_families_and_swept_box(object_root):
     name = f"Kitchen/McpCabinet{uuid.uuid4().hex[:8]}"
     bundle = object_root / "Kitchen" / "Object" / name.split("/")[1]
     (bundle / "links" / "body").mkdir(parents=True)
@@ -103,6 +103,7 @@ def test_articulation_lists_links_joints_states_and_swept_box(object_root):
             {"name": "knob", "type": "continuous", "parent": "door", "child": "knob", "velocity": 2.0},
         ],
         "states": {"closed": {"door": 0.0}, "open": {"door": 1.5}},
+        "detents": {"knob": {"up": 0.0, "down": 3.0}},
         "swept": [[-0.5, 0.5], [-1.3, 0.3], [0.0, 1.0]],
     }
     (bundle / "annotation.yaml").write_text(yaml.safe_dump({"bounding_box": [[-0.5, 0.5], [-0.3, 0.3], [0.0, 1.0]], "articulation": articulation}))
@@ -113,6 +114,8 @@ def test_articulation_lists_links_joints_states_and_swept_box(object_root):
     assert (door["name"], door["type"], door["parent"], door["child"], door["limit"], door["speed"]) == ("door", "revolute", "body", "door", [0.0, 1.57], 1.0)
     assert (knob["type"], "limit" in knob, knob["speed"]) == ("continuous", False, 2.0)
     assert shown["states"] == {"closed": {"door": 0.0}, "open": {"door": 1.5}}
+    assert shown["detents"] == {"knob": {"up": 0.0, "down": 3.0}}
+    assert shown["families"] == {"openness": ["door"], "angle": ["knob"], "setting": ["knob"], "q": ["door", "knob"]}
     assert shown["initial"] == {"door": 0.0, "knob": 0.0}
     assert shown["swept"] == [[-0.5, 0.5], [-1.3, 0.3], [0.0, 1.0]]
 

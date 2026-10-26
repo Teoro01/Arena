@@ -1,11 +1,13 @@
 import asyncio
 import typing
 
+import attrs
 from arena_rclpy_mixins.ROSParamServer import ROSParamT
 from arena_simulation_setup.tree.assets.Animation import AnimationIdentifier
 from arena_simulation_setup.tree.World import WorldIdentifier, anchor_light
-from arena_simulation_setup.tree.World.Scenario import Scenario, ScenarioView
+from arena_simulation_setup.tree.World.Scenario import Scenario, ScenarioView, articulation_problems
 
+from task_generator.manager.world_manager.world_manager import WORLD_ENTITY_PREFIX
 from task_generator.shared import DynamicObstacle, Position, Region
 from task_generator.simulators.human.itinerary import Stop
 from task_generator.tasks.mode import TaskModeKwargs
@@ -37,6 +39,7 @@ class TM_Scenario(TM_Obstacles):
         self.lights = [anchor_light(light, scenario.objects) for light in scenario.lights]
         await self._check_clips(scenario_view, scenario)
         self._ctx.environment_manager.check_stimuli(scenario_view.path.name, scenario.humans, scenario.timeline)
+        await self._check_articulations(scenario_view, scenario)
 
         regions = [
             Region(
@@ -92,9 +95,21 @@ class TM_Scenario(TM_Obstacles):
         if missing:
             self._logger.warning(f"scenario {scenario_view.path.name}: animation clips not found, agents will skip them: {missing} (arena asset find animation <name>)")
 
+    async def _check_articulations(self, scenario_view: ScenarioView, scenario: Scenario) -> None:
+        """Raise ValueError naming the scenario for `joints`, condition fields and timeline sets its or the world's articulated objects refuse, once per world and scenario."""
+        key = (str(self._ctx.world_manager.loaded_world), str(scenario_view.path))
+        if key in self._articulations_checked:
+            return
+        world_objects = [attrs.evolve(obj, name=obj.name.removeprefix(WORLD_ENTITY_PREFIX)) for level in self._ctx.world_manager.world.levels.values() for obj in level.objects]
+        problems = await asyncio.to_thread(articulation_problems, scenario, world_objects)
+        if problems:
+            raise ValueError(f"scenario {scenario_view.path.name!r}: {'; '.join(problems)}")
+        self._articulations_checked.add(key)
+
     def __init__(self, **kwargs: typing.Unpack[TaskModeKwargs]) -> None:
         TM_Obstacles.__init__(self, **kwargs)
         self.scenario: Scenario | None = None
+        self._articulations_checked: set[tuple[str, str]] = set()
 
         self._config = self.node.ROSParam[str](
             self.namespace("file"),

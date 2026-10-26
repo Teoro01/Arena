@@ -27,6 +27,7 @@ from arena_rclpy_mixins.shared import FrameNamespace, Namespace
 from arena_robots.Robot import RobotView
 from arena_runtime._node import NodeInterface
 from arena_runtime.sim._interface import SimUnavailable
+from arena_simulation_setup.shared.conditions import render_until
 
 from task_generator.manager.environment_manager import EnvironmentManager
 from task_generator.manager.robot_manager.controller_manager_client import ControllerManagerClient
@@ -501,9 +502,9 @@ class RobotManager(NodeInterface):
         if ended is not None and ended.outcome == "failed":
             self._logger.info(f"robot {self.name!r} phase {ended.index} ({ended.phase.kind}) failed ({ended.reason})")
         elif ended is not None and ended.outcome == "dropped" and ended.loop is not None:
-            self._logger.info(f"robot {self.name!r} left its loop at phase {ended.index} ({ended.loop.phase.until})")
+            self._logger.info(f"robot {self.name!r} left its loop at phase {ended.index} ({render_until(ended.loop.phase.until_node)})")
         for scoped in transition.violated:
-            self._logger.info(f"robot {self.name!r} condition {scoped.id} violated: {scoped.condition.p}")
+            self._logger.info(f"robot {self.name!r} condition {scoped.id} violated: {render_until(scoped.condition.p_node)}")
         if transition.stop:
             self._stop_current_task()
             if transition.abort is not None and self._abort_episode is not None:

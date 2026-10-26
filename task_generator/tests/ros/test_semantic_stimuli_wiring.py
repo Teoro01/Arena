@@ -104,7 +104,8 @@ def test_articulated_joint_values_stay_out_of_the_human_sim() -> None:
     TaskGenerator._forward_semantic_changes(
         _node(human),
         [
-            _change("env_0/fridge", "articulated", "state", "hinge", "0.4"),
+            _change("env_0/fridge", "articulated", "state", "q.hinge", "0.4"),
+            _change("env_0/fridge", "articulated", "state", "openness.hinge", "0.2"),
             _change("env_0/fridge", "articulated", "state", "state", "open"),
             _change("env_0/fridge", "articulated", "predicate", "moving", "false"),
         ],
