@@ -94,6 +94,39 @@ point covered since the last message, see the Driven joints section of [`JOINTS.
 The same message goes out again on `<namespace>/sim_peds`, which the Gazebo pedestrian plugin reads: unchanged in a spread
 world, every ped moved into the simulator frame by `Realizer.placement()` when the levels are stacked (`world.levels`).
 
+## Resting on furniture
+
+`Pedestrian.pose` is the ped's body frame: the origin at the soles under the pelvis, z up the body. Every renderer
+moves its character along that z axis until its lowest sole point is at body height 0, so a walker stands on the floor
+and a sit clip, which folds the legs under hips kept at standing height, lowers the body as the legs fold.
+
+A backend reports the seat or bed a ped rests on through `_support()` (humansim: the seat an agent is parked on, with its
+surface height), and `publish_arena_peds` places it with [`support.py`](support.py) from its joint angles and the
+character's measurements (`pelvis_clearance` and `legs` in the asset annotation, measured by the arena-assets human
+build, else measured off its skin, typical values with a warning without either). A sitter whose planted pelvis would end below its
+seat's surface plus the seated clearance is lifted to it. A lying ped is tipped onto its back, the head away from its
+yaw, with the pelvis over its seat at the mattress plus the lying clearance. A possessed ped is left as its stream sends
+it.
+
+A `sit` clip on the body slot waits until the ped is parked on its seat, then plays a sit-down planned per ped and seat
+instead ([`plan_seat`](support.py)). The pelvis sits back against the seat's rear edge (`Support.back`, from the sit
+slot's box) by the character's lying clearance, forward only as far as the backs of the calves need to clear the front
+edge (`Support.front`) by `SHIN_GAP`, and at least `PELVIS_MARGIN` behind it. The feet are planted where the calves
+end up vertical. The pelvis drops along the `squat` Animation clip's drop and slides back from over the feet onto the
+seat, the legs solved for the planted feet with flat soles and the torso taking the squat's forward lean. The arms
+rise with the fold to `SEATED_ARMS`, forearms forward, clear of the thighs and hips. Once down the
+torso reclines to vertical over `RECLINE_S`, where the layer parks. When the slot ends the ped leans forward again over
+`LEAN_S` and rises the way it sat down. A seat too high for the shins to reach the floor ends with horizontal thighs and
+dangling shins, the pelvis held at the seat's surface and sliding from the seat's standing point onto the seat as the
+hips fold. Without a `squat` clip the `sit` clip plays as before.
+
+The body is placed every tick so the feet stay where they were planted. It blends from where the ped stood into its
+resting pose when it is parked, over the sit-down's descent (`SeatPlan.down`, at least `SETTLE_S`), keeps its seat
+until the rise is over after the engine releases it, and blends over `SETTLE_S` to wherever the engine put it. The
+engine keeps a released agent where it stood before it was parked for its `SEAT_RISE_S` (1.5 s), so the rise ends where
+it walks off from. A lying ped blends over `LIE_S` both ways. A character whose annotation lacks `pelvis_clearance` and `legs`
+is measured off its skin (`meshes/<name>.dae`) with the arena-assets human build's code.
+
 ## Fitting a gait profile from a clip
 
 The walk and run poses `GaitGenerator` emits come from the gait profiles in [`profiles/`](profiles/)
@@ -159,6 +192,13 @@ Common/Animation/<name>/
 Adding a clip: write it with `write_clip(Path("arena_simulation_setup/assets/Common/Animation/<name>"), frames, meta)`
 (frames are the players' `{"t", "angles", "root_xy_yaw", "animation_state"}` dicts), check it with
 `arena asset find animation <name>`, then publish it with `arena asset push animation <name>` (needs `GCS_ACCESS_TOKEN`).
+A clip from CMU mocap (the cgspeed BVH conversion, the `cmu_mb` rig of the human assets) comes from
+[`bvh.py`](bvh.py): `python3 -m task_generator.simulators.human.bvh 22_14.bvh --skin <human>/meshes/<human>.dae -o
+.../Animation/squat --from 0.72 --to 1.75` turns each bone's rotation into its bind frame, read off any human asset's
+skin (they share the rig), and solves it for its wire joints through `bone_map.json`, the root held upright with its
+tilt folded into the thighs and the lower back. Only the legs and the spine are converted by default, the rest stays at the
+neutral stance, and the feet keep their soles flat. `--parallel` holds the hips' yaw and abduction at 0 for a squat with
+parallel legs. The shipped `squat` is the first squat of CMU 22_14 (0.72 to 1.75 s) converted with `--parallel`.
 A scenario's clips (`ScenarioView.agent_clips`) are resolved when the scenario task loads it: bucket clips are
 fetched before the first agent plays one, and missing ones are named in one warning. Publishing a world
 (`arena asset push world`) refuses clips that only resolve locally.
@@ -470,6 +510,19 @@ the object's origin, not its seat, so an object with seats and no `interaction_r
 whole bounding-box footprint from beside it: the farthest corner from the origin plus the ped radius. Annotated
 seats also go out with their conflicts, the pairs of sit slots that overlap, so the engine never lets two agents
 hold overlapping seats and seats as many sitters as fit together.
+
+Each seat also has the height of the surface a body rests on, which stays in the adapter: a sit slot's is the top of
+its z range, which the asset build measures; a scenario seat's is its `z`, else that of the sit slot it lies in or
+within 15 cm of, so a lying seat along a bed gives its mattress as `z`. Both add the object's own z. A seat inside a
+sit slot also goes out with its standing point (`seat_approach`, [`seat_stand`](support.py)): ahead of the seat along
+its facing by the slot's front edge plus `SHIN_GAP` and the leg radius, where the calves clear the edge, and never
+inside the object's bounding box. The engine walks a sitter there facing where it walks, turns it to the seat's
+heading within reach of the point, and parks it on the seat once it faces that way. A seat without one, and any seat a
+`LIE_ON` takes, is arrived at from anywhere within 0.9 m. The engine parks an
+arrived agent exactly on its seat, and the latched `interactions` frame names the seat each participant of an active
+`SIT_ON` or `LIE_ON` holds (`seat_holds()`). An agent parked on its held seat rests on that seat's surface (see
+Resting on furniture). An agent on its feet, on a generated ring slot, beside a full object or on a seat of unknown height
+stays where the clip puts it.
 
 The adapter follows the engine's latched `interactions` frame and reports the seat indices the participants of
 every `SIT_ON` and `LIE_ON` hold on an object with annotated seats through `held_seats()`, by object sim path,

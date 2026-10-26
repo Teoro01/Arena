@@ -11,6 +11,7 @@ import attrs
 import numpy as np
 import yaml
 from arena_humansim.core.interaction_kinds import InteractionType, MembershipRole
+from arena_humansim.utils.types import InteractionOutcome
 from arena_humansim_msgs.msg import (
     AgentFrame as AgentFrameMsg,
 )
@@ -91,7 +92,7 @@ from arena_runtime_msgs.msg import LockstepChannel
 from arena_simulation_setup.shared.world import CABIN_DOOR_INSET, CABIN_DOOR_THRESHOLD, CABIN_DOOR_WIDTH, Stairs
 from arena_simulation_setup.tree.assets.Human import HumanIdentifier
 from arena_simulation_setup.tree.World.model import elevator_doorway_pose
-from arena_simulation_setup.utils.affordance import AffordanceClaims, AffordanceKind, AffordanceSlot, SlotOccupied, conflicts, max_occupancy, placed_slots
+from arena_simulation_setup.utils.affordance import AffordanceClaims, AffordanceKind, AffordanceSlot, SlotOccupied, conflicts, has_z, max_occupancy, placed_slots
 from geometry_msgs.msg import (
     Point,
     Point32,
@@ -121,6 +122,7 @@ from task_generator.manager.realizer import Realizer
 from task_generator.shared import Door, DynamicObstacle, Elevator, Obstacle, Orientation, Pose, Position, Region, Robot, Wall
 from task_generator.simulators.human import PED_RADIUS, BaseHumanSimulator, HumanSimulatorOptions, Segment
 from task_generator.simulators.human.itinerary import STIMULUS_TELEPORTED, ItineraryDriver, Stop, semantic_atom
+from task_generator.simulators.human.support import Support, seat_stand
 
 from .agent import ArenaHumanDynamicObstacle, agent_type_def, agent_type_stimuli, flow_agent_template, path_agent_type_name
 
@@ -170,6 +172,93 @@ def seat_capacity(humansim: Mapping[str, typing.Any], slots: Sequence[Affordance
     if "seats" in humansim:
         return max(1, len(humansim["seats"]))
     return max(1, max_occupancy(slots))
+
+
+def slot_height(slot: AffordanceSlot) -> float:
+    """Height of a sit slot's surface in the object frame, the object standing on its floor, NaN for a slot without a z range."""
+    return slot.bbox[2][1] if has_z(slot.bbox) else math.nan
+
+
+SEAT_SLOT_REACH = 0.15  # m, a scenario seat this close to a sit slot's footprint takes that slot's height
+
+
+def seat_height(seat: Pose, slots: Sequence[AffordanceSlot]) -> float:
+    """Surface height of a scenario seat in the object frame, NaN when unknown.
+
+    Its z when the scenario gives one, else the height of the sit slot it lies in or next to (within SEAT_SLOT_REACH);
+    among overlapping slots, the one whose center is nearest.
+    """
+    if seat.position.z > 0.0:
+        return seat.position.z
+    slot = seat_slot(seat, slots)
+    return math.nan if slot is None else slot_height(slot)
+
+
+def seat_slot(seat: Pose, slots: Sequence[AffordanceSlot]) -> AffordanceSlot | None:
+    """The sit slot with a z range a scenario seat lies in or next to (within SEAT_SLOT_REACH), the nearest center among overlapping ones."""
+    xy = (seat.position.x, seat.position.y)
+    near = [slot for slot in slots if has_z(slot.bbox) and slot.distance(xy) <= SEAT_SLOT_REACH]
+    return min(near, key=lambda slot: (slot.distance(xy), math.dist(slot.center, xy))) if near else None
+
+
+def box_reach(seat: Pose, box: Sequence[Sequence[float]], behind: bool = False) -> float:
+    """How far ahead of a seat along its facing, or behind it, an object-frame box ends."""
+    yaw = seat.orientation.to_yaw() + (math.pi if behind else 0.0)
+    reach = math.inf
+    for (low, high), at, step in zip(box[:2], (seat.position.x, seat.position.y), (math.cos(yaw), math.sin(yaw)), strict=True):
+        if step > 1e-9:
+            reach = min(reach, (high - at) / step)
+        elif step < -1e-9:
+            reach = min(reach, (low - at) / step)
+    return max(0.0, reach)
+
+
+def seat_reach(seat: Pose, slot: AffordanceSlot, behind: bool = False) -> float:
+    """How far ahead of a seat along its facing, or behind it, its slot's box ends, in the object frame."""
+    return box_reach(seat, slot.bbox, behind)
+
+
+def seat_approach(seat: Pose, front: float | None, bounding_box: Sequence[Sequence[float]] | None) -> float:
+    """Where a sitter stands ahead of a seat before it sits (`seat_stand`), never inside the object's bounding box, 0 for a seat outside every slot."""
+    if front is None:
+        return 0.0
+    return max(seat_stand(front), 0.0 if bounding_box is None else box_reach(seat, bounding_box))
+
+
+@attrs.frozen
+class SeatHold:
+    """The object seat an agent holds for a sit or lie interaction."""
+
+    kind: InteractionType
+    object_id: str
+    seat: int
+
+
+@attrs.frozen
+class Seat:
+    """An object seat in engine coordinates, the height of its surface above the floor (NaN when unknown) and how far ahead and behind its slot ends."""
+
+    x: float
+    y: float
+    height: float
+    front: float | None = None
+    back: float | None = None
+
+
+SEAT_PARK_TOLERANCE = 0.05  # m
+
+
+def seat_holds(frame: InteractionFrameMsg) -> dict[int, SeatHold]:
+    """Seats the participants of active sit and lie interactions hold, by agent."""
+    holds: dict[int, SeatHold] = {}
+    objects, offsets, members, seats, roles = list(frame.object_id), list(frame.member_offset), list(frame.member_id), list(frame.member_seat), list(frame.member_role)
+    for index, (kind, outcome) in enumerate(zip(frame.interaction_type, frame.outcome, strict=True)):
+        if kind not in (InteractionType.SIT_ON, InteractionType.LIE_ON) or outcome != InteractionOutcome.ACTIVE or not objects[index]:
+            continue
+        for m in range(offsets[index], offsets[index + 1]):
+            if roles[m] == MembershipRole.PARTICIPANT and seats[m] >= 0:
+                holds[int(members[m])] = SeatHold(kind=InteractionType(kind), object_id=objects[index], seat=int(seats[m]))
+    return holds
 
 
 def held_seats(frame: InteractionFrameMsg) -> dict[str, list[int]]:
@@ -412,6 +501,9 @@ class ArenaHumanSimulator(BaseHumanSimulator):
 
         self._held_seats: dict[str, list[int]] = {}
         self._seat_slots: dict[str, list[AffordanceSlot]] = {}
+        self._seats: dict[str, list[Seat]] = {}
+        self._seat_holds: dict[int, SeatHold] = {}
+        self._supports: dict[int, Support] = {}
         self._seat_violation_reported = False
         self.node.create_subscription(
             InteractionFrameMsg,
@@ -487,7 +579,25 @@ class ArenaHumanSimulator(BaseHumanSimulator):
         return msg
 
     def _interactions_callback(self, msg: InteractionFrameMsg) -> None:
-        self.node.event_loop.call_soon_threadsafe(self._apply_held_seats, held_seats(msg))
+        self.node.event_loop.call_soon_threadsafe(self._apply_interactions, held_seats(msg), seat_holds(msg))
+
+    def _apply_interactions(self, held: dict[str, list[int]], holds: dict[int, SeatHold]) -> None:
+        self._seat_holds = holds
+        self._apply_held_seats(held)
+
+    def _parked_support(self, agent_id: int, ex: float, ey: float) -> Support | None:
+        """The seat the agent is parked on, None while it is on its feet or the seat's height is unknown."""
+        hold = self._seat_holds.get(agent_id)
+        seats = self._seats.get(hold.object_id, []) if hold is not None else []
+        if hold is None or not 0 <= hold.seat < len(seats):
+            return None
+        seat = seats[hold.seat]
+        if math.isnan(seat.height) or math.dist((ex, ey), (seat.x, seat.y)) > SEAT_PARK_TOLERANCE:
+            return None
+        return Support(kind="lie" if hold.kind == InteractionType.LIE_ON else "sit", height=seat.height, front=seat.front, back=seat.back)
+
+    def _support(self, ped: Pedestrian) -> Support | None:
+        return self._supports.get(ped.id)
 
     def _apply_held_seats(self, held: dict[str, list[int]]) -> None:
         if held == self._held_seats:
@@ -842,19 +952,30 @@ class ArenaHumanSimulator(BaseHumanSimulator):
         x, y = self._to_engine(placed.position.x, placed.position.y)
         return Pose2DMsg(x=x, y=y, theta=placed.orientation.to_yaw())
 
-    def _seat_poses(self, obstacle: Obstacle, slots: Sequence[AffordanceSlot]) -> list[Pose2DMsg]:
-        """Scenario seats override the annotation's sit slots, including an empty list. A bad seat costs the seats, not the object."""
+    def _seat_poses(self, obstacle: Obstacle, slots: Sequence[AffordanceSlot], bounding_box: Sequence[Sequence[float]] | None) -> tuple[list[Pose2DMsg], list[float], list[tuple[float, float] | None], list[float]]:
+        """Seats, the heights of their surfaces above the floor (NaN where unknown, see `seat_height`), how far their slots reach ahead and behind (`seat_reach`) and their standing points (`seat_approach`).
+
+        Scenario seats override the annotation's sit slots, including an empty list. A bad seat costs the seats, not the
+        object; bad sit slots cost scenario seats only their heights. Heights add the object's own z (a raised bed) and
+        assume it stands upright.
+        """
         humansim = obstacle.humansim
         try:
             if "seats" in humansim:
                 seats = [Pose.parse(seat) for seat in humansim["seats"]]
+                heights = [seat_height(seat, slots) for seat in seats]
+                edges: list[tuple[float, float] | None] = [None if (slot := seat_slot(seat, slots)) is None else (seat_reach(seat, slot), seat_reach(seat, slot, behind=True)) for seat in seats]
             else:
                 rng = self.node.conf.General.RNG.stream("humansim", "seats", obstacle.sim_path)
                 seats = [slot.pose(rng) for slot in slots]
-            return [self._seat_pose(obstacle.pose, seat) for seat in seats]
+                heights = [slot_height(slot) for slot in slots]
+                edges = [(seat_reach(seat, slot), seat_reach(seat, slot, behind=True)) for seat, slot in zip(seats, slots, strict=True)]
+            floor = obstacle.pose.position.z
+            approaches = [seat_approach(seat, None if edge is None else edge[0], bounding_box) for seat, edge in zip(seats, edges, strict=True)]
+            return [self._seat_pose(obstacle.pose, seat) for seat in seats], [floor + height for height in heights], edges, approaches
         except (AttributeError, KeyError, TypeError, ValueError) as e:
             self._logger.warning(f"Ignoring seats of '{obstacle.sim_path}': {e}")
-            return []
+            return [], [], [], []
 
     async def _pedestrian_update_loop(self):
         """Spawn an actor for each flow agent a source creates, delete it when a
@@ -961,6 +1082,7 @@ class ArenaHumanSimulator(BaseHumanSimulator):
         peds = Pedestrians()
         peds.header = msg.header
         gestures_by_id = self._agent_gestures
+        self._supports = {}
         n = len(msg.agent_id)
         gait_phase = msg.gait_phase if len(msg.gait_phase) == n else [0.0] * n
         gait_cadence = msg.gait_cadence if len(msg.gait_cadence) == n else [0.0] * n
@@ -996,6 +1118,8 @@ class ArenaHumanSimulator(BaseHumanSimulator):
             ped.gestures = gestures
             ped.interaction_id = int(interaction_id)
             ped.interaction_type = int(interaction_type)
+            if (support := self._parked_support(agent_id, ex, ey)) is not None:
+                self._supports[agent_id] = support
 
             peds.pedestrians.append(ped)  # pyright: ignore[reportAttributeAccessIssue]
         return peds
@@ -1200,7 +1324,8 @@ class ArenaHumanSimulator(BaseHumanSimulator):
                 satisfies: dict = humansim.get("satisfies") or {}
                 info.satisfies_keys = list(satisfies.keys())
                 info.satisfies_values = [float(v) for v in satisfies.values()]
-                info.seats = self._seat_poses(obstacle, slots)
+                info.seats, heights, edges, info.seat_approach = self._seat_poses(obstacle, slots, bounding_box)
+                self._seats[obstacle.sim_path] = [Seat(x=seat.x, y=seat.y, height=height, front=None if edge is None else edge[0], back=None if edge is None else edge[1]) for seat, height, edge in zip(info.seats, heights, edges, strict=True)]
                 if "seats" not in humansim and slots and len(info.seats) == len(slots):
                     info.seat_conflict_offset, info.seat_conflicts = conflict_offsets(slots)
                     self._seat_slots[obstacle.sim_path] = slots
@@ -1569,7 +1694,7 @@ class ArenaHumanSimulator(BaseHumanSimulator):
             self._agent_gestures = {}
             self._agent_types = {}
             self._seat_violation_reported = False
-            self._apply_held_seats({})
+            self._apply_interactions({}, {})
             self._arena_pedestrians = Pedestrians()
             self._arena_pedestrians.header.frame_id = "map"
             await self._publish_interpolated()

@@ -13,8 +13,9 @@ LATCHED_DEPTH = 1
 
 
 class Rig:
-    def __init__(self, arena: typing.Any, probe: typing.Any, executor: typing.Any) -> None:
+    def __init__(self, arena: typing.Any, probe: typing.Any, executor: typing.Any, servers: typing.Sequence[typing.Any] = ()) -> None:
         self.arena = arena
+        self.servers = list(servers)
         self.probe = probe
         self.executor = executor
         self._extra: list[typing.Any] = []
@@ -137,7 +138,7 @@ async def _run(scenario: typing.Callable[[Rig], typing.Awaitable[None]], sim: st
     probe = Probe()
     executor.add_node(arena)
     executor.add_node(probe)
-    rig = Rig(arena, probe, executor)
+    rig = Rig(arena, probe, executor, servers)
     loop = asyncio.get_running_loop()
     spin = loop.run_in_executor(None, executor.spin)
     try:

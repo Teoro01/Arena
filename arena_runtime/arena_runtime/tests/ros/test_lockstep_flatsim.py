@@ -48,5 +48,29 @@ async def _steps_are_exact_and_the_hold_freezes_the_server(rig: Rig) -> None:
     await rig.until(lambda: probe.clock() > released + 5 * DT, 5.0, "flatsim clock after the release")
 
 
+async def _run_survives_a_server_outage_longer_than_a_step_call(rig: Rig) -> None:
+    probe = rig.probe
+    server = rig.servers[0]
+    await probe.start_run(ungated=True)
+    running = probe.clock()
+    await rig.until(lambda: probe.clock() > running + 10 * DT, 5.0, "lockstep steps the server")
+    await rig.until(lambda: probe.status is not None and probe.status.active, 5.0, "active run status")
+
+    rig.executor.remove_node(server)
+    await asyncio.sleep(rig.arena._lifecycle._inner._control._timeout + 2.0)
+    assert probe.status is not None and probe.status.active
+    assert probe.paused is not None and probe.paused.data
+    rig.executor.add_node(server)
+
+    resumed = probe.clock()
+    await rig.until(lambda: probe.clock() > resumed + 10 * DT, 15.0, "lockstep steps again after the outage")
+    assert probe.status.active and probe.paused.data
+    await probe.stop_run()
+
+
 def test_steps_are_exact_and_the_hold_freezes_the_server(flatsim_rig) -> None:
     flatsim_rig(_steps_are_exact_and_the_hold_freezes_the_server)
+
+
+def test_run_survives_a_server_outage_longer_than_a_step_call(flatsim_rig) -> None:
+    flatsim_rig(_run_survives_a_server_outage_longer_than_a_step_call, timeout=150.0)
