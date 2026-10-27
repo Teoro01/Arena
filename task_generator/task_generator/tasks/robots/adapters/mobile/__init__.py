@@ -154,6 +154,13 @@ def _load_nav2() -> type[Adapter]:
     return Nav2Adapter
 
 
+@ADAPTERS["mobile"].register("meshnav")
+def _load_meshnav() -> type[Adapter]:
+    from .meshnav import MeshNavAdapter
+
+    return MeshNavAdapter
+
+
 @ADAPTERS["mobile"].register("external")
 def _load_external() -> type[Adapter]:
     from .external import ExternalAdapter

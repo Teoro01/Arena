@@ -1299,3 +1299,38 @@ view, levels = resolve_world('my_world')
 for level_id, result in nav_at_r(view, radius=0.267, levels=levels).items():
     print(level_id, result.value, result.components, result.cut_off_zones)
 ```
+
+### Navigation mesh
+
+MeshNav plans on a triangle mesh of every walkable surface, built from the
+world's geometry by `arena_simulation_setup.shared.navmesh`. The mesh samples
+a regular grid (0.1 m by default) aligned to the simulator frame over each
+level's floors and elevator cabins, at the floor height, and over every stair
+and escalator half, at the height of its treads at rest (the belt for a belt
+escalator, the landing plates over the pits). A grid point within a wall's
+half thickness plus half a cell is left out where the wall stands between just
+above the surface and 0.4 m over it. The walls are those of `all_walls`, cut
+open at the doors, plus the sides of every elevator cabin but its door side,
+so a cabin is entered only through its door. Doors stay open unless named in
+`shut`, which closes them across their span, and static entities are not
+subtracted. A grid cell becomes two triangles facing up when its four corners
+lie within `climb` (0.25 m by default) of each other in height, so the floor
+runs onto the first step and, in a stacked world, a bottom half's seam meets
+its top half's seam on the level above as one surface. MeshNav builds the mesh
+with the robot's `meshnav.max_step` as the climb, so for a robot whose step
+limit lies below the riser height a staircase no longer joins its levels, and
+with the doors that never open for the robot shut.
+
+```python
+from arena_simulation_setup.shared.navmesh import build_navmesh, navmesh_levels
+from arena_simulation_setup.tree.World import WorldIdentifier
+
+world = WorldIdentifier('stairs_demo').resolve_sync().load()
+mesh = build_navmesh(navmesh_levels(world, world.stack_offsets()), climb=0.2)
+mesh.write_ply('stairs_demo.ply')
+print(len(mesh.vertices), len(mesh.faces), mesh.components().max() + 1)
+```
+
+The `worlds_navmesh` MCP tool does the same for any world name, stacking a
+stacked world and spreading the levels of a spread one, and returns the PLY
+path with its vertex, face and component counts and height range.

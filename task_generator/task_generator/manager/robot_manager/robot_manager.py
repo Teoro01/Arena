@@ -115,6 +115,7 @@ class RobotManager(NodeInterface):
     _runner: TaskRunner
     _unsupported_kinds_logged: set[TaskKind]
     _abort_episode: Callable[[str], None] | None
+    _phase_failure: tuple[int, str] | None
     _launch_handle: LaunchHandle | None
 
     @property
@@ -269,6 +270,7 @@ class RobotManager(NodeInterface):
         self._placed = False
         self._unsupported_kinds_logged = set()
         self._abort_episode = None
+        self._phase_failure = None
         self._cabin_to_clear = ""
 
     def bind_abort(self, fn: Callable[[str], None]) -> None:
@@ -334,6 +336,10 @@ class RobotManager(NodeInterface):
         return self.frame(self._config.model_params.base_frame).raw()
 
     @property
+    def environment_manager(self) -> EnvironmentManager:
+        return self._environment_manager
+
+    @property
     def accepts(self) -> frozenset[TaskKind]:
         """Task kinds this robot's bound adapters can dispatch."""
         return frozenset(self._adapters.keys())
@@ -349,6 +355,7 @@ class RobotManager(NodeInterface):
 
     def _stop_current_task(self) -> None:
         self._runner.stop()
+        self._phase_failure = None
         if self._publish_goal_task is not None:
             self._publish_goal_task.cancel()
             self._publish_goal_task = None
@@ -383,9 +390,15 @@ class RobotManager(NodeInterface):
         reason = adapter.client_for(kind).reason
         return status, reason
 
+    def fail_phase(self, reason: str) -> None:
+        """Fail the active phase with `reason` on the next tick, for an adapter that finds its goal unreachable."""
+        if self._runner.active is not None:
+            self._phase_failure = (self._runner.active, reason)
+
     def begin_episode(self) -> None:
         self._runner.begin_episode()
         self._placed = False
+        self._phase_failure = None
         self._cabin_to_clear = ""
 
     @property
@@ -480,7 +493,10 @@ class RobotManager(NodeInterface):
                 return Transition()
         kind = kind_of(state.phase)
         adapter = self._adapters.get(kind)
-        if adapter is None:
+        failure, self._phase_failure = self._phase_failure, None
+        if failure is not None and failure[0] == state.index:
+            transition = self._runner.fail_active(failure[1])
+        elif adapter is None:
             transition = self._runner.fail_active(self._outcome_for_phase(state.phase)[1] or "")
         else:
             action_done = None if isinstance(state.phase, GoToPhase) else bool(adapter.client_for(kind).is_done())
@@ -569,7 +585,7 @@ class RobotManager(NodeInterface):
     async def submit_task(self, request: TaskRequest, start: Pose | None = None, pedestrians: Iterable[str] = ()) -> None:
         """Resolve a typed TaskRequest and append it to this episode's phases. Phase poses are abstract until dispatch. `start` is the abstract pose the robot begins from, its current pose when omitted, `pedestrians` names the episode's declared pedestrians that are not spawned yet."""
         from task_generator.manager.robot_manager.elevator_routing import route_phases
-        from task_generator.tasks.robots.request import GoToPhase, LoopPhase, kind_of, leaf_phases
+        from task_generator.tasks.robots.request import GoToPhase, LoopPhase, TaskKind, kind_of, leaf_phases
 
         if not request.phases:
             raise ValueError(f"TaskRequest has no phases; nothing to dispatch (robot={self.name!r})")
@@ -584,13 +600,16 @@ class RobotManager(NodeInterface):
                 return attrs.evolve(phase, phases=[resolve(inner) for inner in phase.phases])
             return self._resolve_target(phase) if isinstance(phase, GoToPhase) else phase
 
+        mobile = self._adapters.get(TaskKind.GOTO_POSE)
+        walks = self._climbs if mobile is not None and mobile.routes_levels else frozenset()
         routed_phases = route_phases(
             [resolve(phase) for phase in request.phases],
             start.position,
             world_manager,
             robot_radius=self.radius,
             goal_tolerance=float(self.node.conf.Robot.GOAL_TOLERANCE_RADIUS.value),
-            climbs=self._climbs,
+            climbs=self._climbs - walks,
+            walks=walks,
         )
 
         self.node._known_subjects.update(pedestrians)

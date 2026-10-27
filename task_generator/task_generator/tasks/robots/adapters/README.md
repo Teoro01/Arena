@@ -45,6 +45,7 @@ each bound adapter.
 | File | Bringup | Client |
 |---|---|---|
 | `nav2.py` | `Nav2Bringup` | `GotoPoseClient` |
+| `meshnav.py` | `MeshNavBringup` | `GotoPoseClient` |
 | `none.py` | `NoneBringup` | `GotoPoseClient` |
 | `external.py` | `ExternalBringup` | `GotoPoseClient` |
 | `drl.py` | `DrlBringup` | `GotoPoseClient` |
@@ -75,6 +76,27 @@ cannot send.
 `ExternalBringup` reads `goal_topic`, `cmd_vel_topic`, `launch_file`,
 `requires`, and `extra` from `caps/mobile.yaml > external:`, configure them
 there, not as constructor arguments.
+
+`MeshNavAdapter` (`robot.mobile_adapter:=meshnav`, needs `arena feature meshnav
+install`) plans with MeshNav (Move Base Flex mesh navigation) on a triangle mesh
+of every walkable floor, elevator cabin, stair and escalator. Before bringup it
+builds the mesh of the spawned world in the simulator frame with
+[`shared/navmesh.py`](../../../../../arena_simulation_setup/src/arena_simulation_setup/shared/navmesh.py),
+bridging height steps up to the robot's `meshnav.max_step` and closing the doors
+that never open for the robot (`mechanism_map.static_shut_doors`: no activation
+distance, or a locked gate it is not authorized for, unless a pressure plate
+drives the door or an `unlock_on` regime unlocks it), and writes it once as
+`<tmp>/arena_meshnav/<hash>.ply`, one file per distinct mesh. Goals are placed on
+their level and sent in the robot's `odom` frame, which is the simulator frame.
+Its `routes_levels` is set, so `RobotManager.submit_task` routes its goals with
+the stair kinds the robot climbs as `walks` of `elevator_routing.route_phases`:
+elevator rides get their legs and ride phase as for nav2, while stairs and
+escalators get no phases and the mesh plans over them. Before sending a goal the
+adapter looks up the mesh vertices nearest to the robot and the goal, and when
+they lie in separate components (no stair, escalator or door joins them, and no
+ride was inserted) it logs a warning and fails the phase through
+`RobotManager.fail_phase` instead of sending a goal MBF cannot reach. Ride phases
+are exempt, and so is any point more than 1 m from the mesh.
 
 ## Adding a new adapter kind
 
