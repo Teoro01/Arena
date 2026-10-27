@@ -411,11 +411,15 @@ gaps up to 1 s bridged. Each entry also carries `stays:`, one per continuous sta
 0.5 m faster than 6 m/s, stays under 1 s dropped) with its `start`, entry `pose` and `velocity` (over the first 0.4 s)
 and `legs: [[x, y, speed, dwell], ...]`, corners within 0.25 m of the stay in space and time with each stop as the dwell
 of the leg before, for a path follower. zara01 and zara02 share one world, with zara02 moved 1.15 m
-along y into zara01's frame, the placement SocNavBench gives the two.
+along y into zara01's frame, the placement SocNavBench gives the two. SocNavBench's eth and hotel copies are in meters,
+its zara and univ copies are not: zara is stretched about 23% along x and squeezed about 9% along y, and univ also lacks
+the camera's perspective. The importer takes both to meters, zara with the affine map that gives the parked car of the
+Social-GAN and TrajNet++ zara calibration its 1.81 x 4.63 m, univ with the homography that gives the 2.95 x 3.00 m paving
+rectangle of OpenTraj's univ ground-plane measurement its size.
 
 `arena asset import scenario socnavbench <episode>` writes one of SocNavBench's curated episodes on these sequences as a
 replay scenario that also carries the robot task: `robots:` holds the episode's start and its goal as one `goto` phase,
-mapped back from SocNavBench's map frame into the frame of the eth_ucy worlds, and `humans:` holds the pedestrians
+mapped back from SocNavBench's map frame into the frame of the eth_ucy worlds and taken to meters the same way, and `humans:` holds the pedestrians
 SocNavBench plays in the episode (ids from the episode's first pedestrian on, up to the first one who enters later than
 the time budget), on tracks cut to the budget and timed from that first pedestrian's first frame. Positions are the ones
 the eth_ucy scenario plays. The world is `socnavbench_eth` or `socnavbench_zara`: the eth_ucy floor with the start and

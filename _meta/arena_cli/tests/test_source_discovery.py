@@ -51,3 +51,10 @@ def test_fastdds_profiles_probe_more_than_32_participant_ids(net: str) -> None:
     transport = ET.parse(ARENA / "_meta" / "docker" / f"fastdds.{net}.xml").getroot().find(f"{NS}transport_descriptors/{NS}transport_descriptor")
     assert transport is not None
     assert int(transport.findtext(f"{NS}maxInitialPeersRange", "0")) == 120
+
+
+def test_local_fastdds_profile_sizes_socket_buffers_to_4_mb() -> None:
+    transport = ET.parse(ARENA / "_meta" / "docker" / "fastdds.local.xml").getroot().find(f"{NS}transport_descriptors/{NS}transport_descriptor")
+    assert transport is not None
+    assert int(transport.findtext(f"{NS}sendBufferSize", "0")) == 4194304
+    assert int(transport.findtext(f"{NS}receiveBufferSize", "0")) == 4194304
