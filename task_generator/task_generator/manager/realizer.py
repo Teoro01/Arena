@@ -89,11 +89,8 @@ class Realizer:
         def at(position: Position) -> Position:
             return Position(position.x + dx, position.y + dy, position.z + dz)
 
-        def lifted(value: float | None) -> float | None:
-            return None if value is None else value + dz
-
         if isinstance(target, Wall):
-            return attrs.evolve(target, start=at(target.start), end=at(target.end), top=lifted(target.top), bottom=lifted(target.bottom))
+            return attrs.evolve(target, start=at(target.start), end=at(target.end))
         if isinstance(target, Floor):
             return attrs.evolve(target, pos=at(target.pos))
         if isinstance(target, Ceiling):

@@ -528,7 +528,7 @@ def test_place_moves_a_realized_level_1_entity_by_its_stack_shift(realizer):
     wall = realizer.realize(Wall(start=Position(1.0, 1.0, 0.0), end=Position(2.0, 1.0, 0.0), top=2.6, bottom=None), "1")
     placed = realizer.place(wall, "1")
     assert (placed.start.x - wall.start.x, placed.start.y - wall.start.y, placed.start.z - wall.start.z) == pytest.approx((-7.8, 0.0, 3.0))
-    assert (placed.top, placed.bottom) == (5.6, None)
+    assert (placed.top, placed.bottom) == (2.6, None)
     ceiling = realizer.place(realizer.realize(Ceiling(name="c", pos=Position(3.0, 3.0, 0.0), z=2.5), "1"), "1")
     assert ceiling.z == pytest.approx(5.5)
     stair = Stairs(name="up", position=Position(3.7, 2.0, 0.0), top=True, to="down")
