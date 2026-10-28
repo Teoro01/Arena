@@ -294,9 +294,12 @@ Full field reference: [worlds/README.md](worlds/README.md).
 ### Articulated objects
 
 An object whose annotation carries `articulation:` (links, joints, named
-states, built by arena_assets) spawns as one static obstacle per link,
-posed by its joint values, and gets an `articulated` semantic entity under
-its env-prefixed name. Conditions and timelines name it as authored, a level
+states, built by arena_assets) gets an `articulated` semantic entity under
+its env-prefixed name. MuJoCo, Isaac and Gazebo spawn it as one physics
+model: its root fixed in place, each other link a body on a damped joint
+with friction, so robots push its doors and drawers and the fields read the
+joints the simulator measures. flatsim and dummy spawn one static obstacle
+per link and move the links to the joint values. Conditions and timelines name it as authored, a level
 object of world.yaml as much as a scenario object, and a scenario object
 takes the name over from a world object of the same name. Its `joints:` key
 sets the joint values every episode starts from (see the objects keys in
@@ -312,15 +315,21 @@ sets the joint values every episode starts from (see the objects keys in
 | `setting.<joint>` | discrete, writable | a joint with named `detents` (in the object's annotation, see [Object articulation](../arena_assets/README.md#object-articulation)): the detent it sits at, empty between them. Writing a detent name moves it there |
 | `q.<joint>` | continuous, writable | every movable joint's raw value (radians or meters). Writing sets its target, clamped to its limits |
 | `<state>` | predicate | the joints hold that state's values |
-| `moving` | predicate | a joint is away from its target |
-| `blocked` | predicate | the last step was held because a moving link would have entered a robot or pedestrian disc |
+| `moving` | predicate | a joint is away from its target, or in a physics simulator moved since the last tick |
+| `blocked` | predicate | a driven joint is held: in a physics simulator something keeps it from following its drive, in flatsim and dummy a moving link would have entered a robot or pedestrian disc |
 
 Every field is named `<family>.<joint>`, so the parts of an object are
 listed by family without knowing its joints, and `assets_articulation` lists
 the families and their members. The family names, `state`, `target`,
 `moving` and `blocked` are reserved: no state, joint or detent takes one.
 Joints move toward their targets at their `velocity` (1 rad/s or 0.25 m/s
-when unset). An unknown state or detent name, a fraction outside [0, 1] or a
+when unset). In a physics simulator a written target switches on a drive
+of bounded effort, which follows a reference ramped at that velocity and
+lets go once the joint is within 0.05 rad or 1 cm, setting it onto the
+target. A joint no drive holds moves only when pushed, and its target
+follows it. Link masses come from the link boxes (150 kg/m3, 0.2 to 20 kg),
+and a joint's friction holds it against its own weight, so a lid or flap
+stays where it is left. An unknown state or detent name, a fraction outside [0, 1] or a
 non-number joint value is refused as a malformed value, and an episode reset returns every joint to its initial
 value. Loading a scenario under the `scenario` obstacles mode, and the MCP
 `worlds_scenario_validate`, check every `joints:`, every field and family a

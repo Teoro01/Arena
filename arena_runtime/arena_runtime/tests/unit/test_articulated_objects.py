@@ -579,3 +579,318 @@ def test_disc_hits_a_convex_hull_inside_and_within_its_radius():
     assert disc_hits(square, (1.2, 0.5), 0.3)
     assert not disc_hits(square, (1.2, 0.5), 0.1)
     assert not disc_hits([], (0.0, 0.0), 1.0)
+
+
+PHYSICS_DT = 0.05
+
+
+@pytest.fixture
+def on_physics_sim():
+    """A dummy simulator with articulated physics: drives reach their reference one call later, pushes and holds set from the test."""
+
+    def run(body: typing.Callable[..., typing.Awaitable[None]]) -> None:
+        from arena_rclpy_mixins import ArenaMixinNode
+        from arena_rclpy_mixins.shared import Namespace
+
+        from arena_runtime.sim.dummy_simulator import DummySimulator
+
+        class PhysicsSimulator(DummySimulator):
+            ARTICULATED_PHYSICS = True
+
+            def __init__(self, **kwargs: typing.Any) -> None:
+                super().__init__(**kwargs)
+                self.calls: list[tuple] = []
+                self.joints: dict[str, dict[str, float]] = {}
+                self.ctrl: dict[str, dict[str, float]] = {}
+                self.held: dict[tuple[str, str], float] = {}
+
+            async def obstacle_spawn(self, obstacles):
+                self.calls.append(("spawn", list(obstacles)))
+                return await super().obstacle_spawn(obstacles)
+
+            async def obstacle_move(self, obstacles):
+                self.calls.append(("move", list(obstacles)))
+                return await super().obstacle_move(obstacles)
+
+            async def obstacle_delete(self, obstacles):
+                self.calls.append(("delete", list(obstacles)))
+                return await super().obstacle_delete(obstacles)
+
+            async def _articulated_spawn(self, objects):
+                self.calls.append(("articulated", [runtime.name for runtime in objects]))
+                for runtime in objects:
+                    self.joints[runtime.name] = dict(runtime.current)
+                    self.ctrl[runtime.name] = {}
+                return [True] * len(objects)
+
+            async def _articulated_drive(self, commands):
+                self.calls.append(("drive", list(commands)))
+                readings = []
+                for command in commands:
+                    name = command.runtime.name
+                    joints = self.joints.get(name)
+                    if joints is None:
+                        readings.append(None)
+                        continue
+                    for joint, value in self.ctrl[name].items():
+                        joints[joint] = self.held.get((name, joint), value)
+                    for joint in command.place:
+                        joints[joint] = command.reference[joint]
+                    self.ctrl[name] = {joint: command.reference[joint] for joint in command.drive}
+                    readings.append(dict(joints))
+                return readings
+
+            def push(self, name: str, joint: str, value: float) -> None:
+                self.joints[name][joint] = value
+
+        async def main() -> None:
+            suffix = uuid.uuid4().hex[:8]
+            node = ArenaMixinNode(f"articulated_physics_{suffix}", namespace=f"/articulated_physics_{suffix}")
+            sim = PhysicsSimulator(node=node, namespace=Namespace(f"/articulated_physics_{suffix}"), realizer=_realizer())
+            try:
+                await body(sim)
+            finally:
+                await sim.stop_mechanisms()
+                node.destroy_node()
+
+        asyncio.run(main())
+
+    return run
+
+
+async def _settle(sim, runtime, ticks: int = 200) -> int:
+    from arena_runtime.sim import _mechanism_shim as shim
+
+    for tick in range(ticks):
+        await shim._tick(sim, PHYSICS_DT)
+        if not runtime.moving:
+            return tick
+    return ticks
+
+
+def test_a_physics_simulator_spawns_the_whole_object_with_derived_inertias_and_dynamics(assets, on_physics_sim):
+    from arena_runtime.sim._articulation import ANGULAR, LINEAR, MASS_RANGE
+
+    async def body(sim):
+        assert list(await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"]), _obstacle("crate", assets["crate"])])) == [True, True]
+        assert [(verb, _names(items) if verb == "spawn" else items) for verb, items in sim.calls] == [("spawn", ["crate"]), ("articulated", ["cabinet"])]
+        runtime = sim._articulated["cabinet"]
+        assert runtime.physical
+        assert runtime.inertias["body"].mass == MASS_RANGE[1]
+        assert runtime.inertias["door"].mass == pytest.approx(150.0 * 1.0 * 0.02 * 0.5)
+        assert runtime.inertias["door"].center == pytest.approx((0.0, -0.31, 0.25))
+        assert runtime.inertias["knob"].center == pytest.approx((0.0, -0.32, 0.25))
+        assert set(runtime.dynamics) == {"door", "drawer", "knob"}
+        assert runtime.dynamics["door"].friction == ANGULAR.friction
+        assert runtime.dynamics["drawer"].friction == LINEAR.friction
+        assert runtime.dynamics["door"].effort == ANGULAR.effort
+        assert runtime.dynamics["door"].stiffness == pytest.approx(ANGULAR.effort / ANGULAR.saturation)
+        assert _snapshot(sim).discrete == {"state": "closed", "target": "closed"}
+
+    on_physics_sim(body)
+
+
+def test_gravity_raises_the_friction_that_holds_a_lid_and_the_effort_that_lifts_it():
+    from arena_simulation_setup.utils.articulation import structure_articulation
+
+    from arena_runtime.sim._articulation import ANGULAR, EFFORT_PER_FRICTION, GRAVITY, HOLD_MARGIN, LinkInertia, joint_dynamics
+
+    articulation = structure_articulation(
+        {
+            "links": {"box": [], "lid": [], "flap": []},
+            "joints": [
+                {"name": "lid", "type": "revolute", "parent": "box", "child": "lid", "origin": [0.0, 0.2, 0.5], "axis": [1, 0, 0], "limit": [0.0, 1.5]},
+                {"name": "flap", "type": "revolute", "parent": "box", "child": "flap", "origin": [0.3, 0.0, 0.5], "axis": [0, 0, 1], "limit": [0.0, 1.5]},
+            ],
+        }
+    )
+    assert articulation is not None
+    inertias = {
+        "box": LinkInertia(5.0, (0.0, 0.0, 0.25), (0.1, 0.1, 0.1)),
+        "lid": LinkInertia(2.0, (0.0, 0.0, 0.5), (0.01, 0.01, 0.01)),
+        "flap": LinkInertia(1.0, (0.3, -0.3, 0.5), (0.01, 0.01, 0.01)),
+    }
+    dynamics = joint_dynamics(articulation, inertias, None)
+    assert dynamics["lid"].friction == pytest.approx(HOLD_MARGIN * 2.0 * GRAVITY * 0.2)
+    assert dynamics["lid"].effort == pytest.approx(EFFORT_PER_FRICTION * dynamics["lid"].friction)
+    assert dynamics["flap"].friction == ANGULAR.friction
+    assert dynamics["flap"].drive_damping == pytest.approx(2.0 * math.sqrt(dynamics["flap"].stiffness * (1.0 * 0.09 + 0.01 + ANGULAR.armature)))
+
+
+def test_a_physical_drive_ramps_to_the_target_releases_and_snaps_onto_it(assets, on_physics_sim):
+    async def body(sim):
+        await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"])])
+        runtime = sim._articulated["cabinet"]
+        sim.calls.clear()
+        assert sim.set_semantic_value("env_0/cabinet", "target", "open")
+        assert runtime.driving == {"door", "drawer"}
+        ticks = await _settle(sim, runtime)
+        assert 0.4 / 0.2 / PHYSICS_DT <= ticks < 0.4 / 0.2 / PHYSICS_DT + 5
+        assert runtime.current == {"door": 1.5, "drawer": 0.4, "knob": 0.0}
+        assert runtime.driving == set()
+        commands = [command for verb, items in sim.calls if verb == "drive" for command in items]
+        assert all(abs(command.reference["door"] - previous.reference["door"]) <= PHYSICS_DT + 1e-9 for previous, command in zip(commands, commands[1:], strict=False))
+        assert any(command.place == frozenset({"door"}) for command in commands)
+        assert {verb for verb, _items in sim.calls} == {"drive"}
+        snapshot = _snapshot(sim)
+        assert snapshot.discrete == {"state": "open", "target": "open"}
+        assert snapshot.predicates == {"closed": False, "open": True, "moving": False, "blocked": False}
+
+    on_physics_sim(body)
+
+
+def test_a_pushed_joint_moves_its_target_with_it_and_no_drive_pulls_it_back(assets, on_physics_sim):
+    from arena_runtime.sim import _mechanism_shim as shim
+
+    async def body(sim):
+        await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"])])
+        runtime = sim._articulated["cabinet"]
+        sim.push("cabinet", "door", 0.7)
+        await shim._tick(sim, PHYSICS_DT)
+        assert runtime.current["door"] == pytest.approx(0.7)
+        assert runtime.target["door"] == pytest.approx(0.7)
+        assert runtime.moving
+        await shim._tick(sim, PHYSICS_DT)
+        assert not runtime.moving
+        assert sim.calls[-1][1][0].drive == frozenset()
+        assert _snapshot(sim).continuous["openness.door"] == pytest.approx(0.7 / 1.5)
+
+    on_physics_sim(body)
+
+
+def test_a_held_joint_reads_blocked_until_it_is_let_go(assets, on_physics_sim):
+    async def body(sim):
+        from arena_runtime.sim import _mechanism_shim as shim
+
+        await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"])])
+        runtime = sim._articulated["cabinet"]
+        sim.held[("cabinet", "door")] = 0.3
+        assert sim.set_semantic_value("env_0/cabinet", "q.door", "1.5")
+        for _ in range(20):
+            await shim._tick(sim, PHYSICS_DT)
+        assert runtime.current["door"] == pytest.approx(0.3)
+        assert runtime.blocked
+        assert _snapshot(sim).predicates["blocked"]
+        assert sim.calls[-1][1][0].reference["door"] == pytest.approx(0.3 + 0.25)
+        del sim.held[("cabinet", "door")]
+        await _settle(sim, runtime)
+        assert runtime.current["door"] == 1.5
+        assert not runtime.blocked
+
+    on_physics_sim(body)
+
+
+def test_a_physical_object_moves_and_deletes_as_one_and_resets_its_joints_in_place(assets, on_physics_sim):
+    import attrs
+    from task_generator.shared import Pose, Position
+
+    async def body(sim):
+        from arena_runtime.sim import _mechanism_shim as shim
+
+        cabinet = _obstacle("cabinet", assets["cabinet"])
+        await sim.spawn_objects([cabinet])
+        runtime = sim._articulated["cabinet"]
+        sim.push("cabinet", "drawer", 0.3)
+        await shim._tick(sim, PHYSICS_DT)
+        sim.calls.clear()
+        moved = attrs.evolve(cabinet, pose=Pose(position=Position(5.0, 0.0, 0.0)), joints={"door": "open"})
+        assert list(await sim.move_objects([moved])) == [True]
+        (move, drive) = sim.calls
+        assert (move[0], _names(move[1])) == ("move", ["cabinet"])
+        assert drive[0] == "drive"
+        assert drive[1][0].place == frozenset({"door", "drawer", "knob"})
+        assert sim.joints["cabinet"] == runtime.current == {"door": 1.5, "drawer": 0.0, "knob": 0.0}
+        sim.push("cabinet", "door", 0.2)
+        await shim._tick(sim, PHYSICS_DT)
+        sim.reset_semantics()
+        await shim._tick(sim, PHYSICS_DT)
+        assert sim.calls[-1][1][0].place == frozenset({"door", "drawer", "knob"})
+        assert sim.joints["cabinet"]["door"] == 1.5
+        sim.calls.clear()
+        assert list(await sim.delete_objects([moved])) == [True]
+        assert [(verb, _names(items)) for verb, items in sim.calls] == [("delete", ["cabinet"])]
+        assert sim._articulated == {}
+
+    on_physics_sim(body)
+
+
+def test_a_continuous_joint_reads_back_wrapped(assets, on_physics_sim):
+    from arena_runtime.sim import _mechanism_shim as shim
+
+    async def body(sim):
+        await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"])])
+        runtime = sim._articulated["cabinet"]
+        sim.push("cabinet", "knob", 3 * math.pi)
+        await shim._tick(sim, PHYSICS_DT)
+        assert abs(runtime.current["knob"]) == pytest.approx(math.pi)
+        assert _snapshot(sim).continuous["angle.knob"] == pytest.approx(math.pi)
+
+    on_physics_sim(body)
+
+
+def test_a_placement_the_simulator_missed_is_sent_again(assets, on_physics_sim):
+    from arena_runtime.sim import _mechanism_shim as shim
+
+    async def body(sim):
+        await sim.spawn_objects([_obstacle("cabinet", assets["cabinet"], joints={"door": "open"})])
+        runtime = sim._articulated["cabinet"]
+        sim.reset_semantics()
+        joints = sim.joints.pop("cabinet")
+        await shim._tick(sim, PHYSICS_DT)
+        assert not runtime.placed
+        joints["door"] = 0.0
+        sim.joints["cabinet"] = joints
+        await shim._tick(sim, PHYSICS_DT)
+        assert runtime.placed
+        assert sim.calls[-1][1][0].place == frozenset({"door", "drawer", "knob"})
+        assert joints["door"] == 1.5
+
+    on_physics_sim(body)
+
+
+def test_the_gazebo_model_pins_the_root_and_drives_the_movable_joints(assets, tmp_path):
+    import xml.etree.ElementTree as ET
+
+    from arena_simulation_setup.utils.geometry import Scale
+
+    from arena_runtime.sim._articulation import resolve_articulated
+    from arena_runtime.sim.gazebo_simulator.gazebo_simulator import _articulated_sdf
+
+    (tmp_path / "door.sdf").write_text('<sdf version="1.7"><model name="door"><static>true</static><link name="link"><visual name="visual"><geometry><mesh><uri>door.dae</uri></mesh></geometry></visual><collision name="collision"><geometry><mesh><uri>door.dae</uri></mesh></geometry></collision></link></model></sdf>')
+    runtime = asyncio.run(resolve_articulated(_obstacle("cabinet", assets["cabinet"], scale=Scale(2.0, 1.0, 1.0), joints={"door": 0.5}), "env_0/cabinet"))
+    assert runtime is not None
+    runtime.make_physical()
+    links = [(link, joint, tmp_path / "door.sdf" if link == "door" else None) for link, joint in runtime.tree()]
+    model = ET.fromstring(_articulated_sdf("env_0/cabinet", runtime, links)).find("model")
+    assert model is not None
+    assert model.get("name") == "env_0/cabinet"
+    joints = {joint.get("name"): joint for joint in model.findall("joint")}
+    assert (joints["arena_world_pin"].get("type"), joints["arena_world_pin"].findtext("parent"), joints["arena_world_pin"].findtext("child")) == ("fixed", "world", "body")
+    door = joints["door"]
+    assert (door.get("type"), door.findtext("parent"), door.findtext("child")) == ("revolute", "body", "door")
+    assert [float(value) for value in door.findtext("pose").split()] == pytest.approx([1.0, -0.3, 0.0, 0.0, 0.0, 0.0])
+    assert float(door.findtext("axis/limit/upper")) == pytest.approx(1.6)
+    assert float(door.findtext("axis/dynamics/friction")) == pytest.approx(runtime.dynamics["door"].friction)
+    assert joints["knob"].get("type") == "revolute"
+    assert float(joints["knob"].findtext("axis/limit/upper")) > 1e15
+    links_by_name = {link.get("name"): link for link in model.findall("link")}
+    assert set(links_by_name) == {"body", "door", "drawer", "knob"}
+    assert float(links_by_name["door"].findtext("inertial/mass")) == pytest.approx(runtime.inertias["door"].mass)
+    assert links_by_name["door"].findtext("visual/geometry/mesh/uri") == str(tmp_path / "door.dae")
+    assert links_by_name["door"].findtext("visual/geometry/mesh/scale") == "2.0 1.0 1.0"
+    assert links_by_name["door"].findtext("collision/surface/contact/collide_bitmask") == "0xfffe"
+    assert links_by_name["body"].find("collision") is None
+    drives = {joint.get("name"): joint for joint in model.findall("plugin/joint")}
+    assert set(drives) == {"door", "drawer", "knob"}
+    assert (float(drives["door"].get("initial")), drives["knob"].get("wraps")) == (0.5, "true")
+    assert float(drives["door"].get("stiffness")) == pytest.approx(runtime.dynamics["door"].stiffness)
+
+
+def test_the_joint_codes_match_every_simulators_link_message():
+    from arena_mujoco_msgs.msg import ArticulatedLink as MujocoLink
+    from isaacsim_msgs.msg import ArticulatedLink as IsaacLink
+
+    from arena_runtime.sim._articulation import JOINT_CODES
+
+    for message in (MujocoLink, IsaacLink):
+        assert {kind.name: code for kind, code in JOINT_CODES.items()} == {name: getattr(message, name) for name in ("REVOLUTE", "PRISMATIC", "CONTINUOUS", "FIXED")}

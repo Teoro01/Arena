@@ -29,10 +29,12 @@ from arena_rclpy_mixins.Time import Time
 from arena_simulation_setup.shared import Ceiling, Light, cct_to_rgb
 from arena_simulation_setup.tree.assets.Material import MaterialIdentifier
 from arena_simulation_setup.tree.Wall import WallSegment
+from arena_simulation_setup.utils.articulation import Joint, JointType, Values
+from arena_simulation_setup.utils.geometry import Scale
 from arena_simulation_setup.utils.material import MdlUtil
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Quaternion
 from geometry_msgs.msg import Pose as RosPose
-from gz.msgs10 import light_pb2, material_color_pb2, world_stats_pb2
+from gz.msgs10 import double_v_pb2, light_pb2, material_color_pb2, world_stats_pb2
 from launch import LaunchDescription
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from ros_gz_interfaces.msg import Entity as EntityMsg
@@ -57,6 +59,8 @@ from viewport_control_msgs.msg import ViewportView
 from viewport_control_msgs.srv import ViewportSetProjection, ViewportSetReferenceFrame, ViewportSetView
 
 from arena_runtime.sim import BaseSim, SimKwargs, SimLifecycle, SimUnavailable
+from arena_runtime.sim._articulation import ArticulatedObject, command_fields
+from arena_runtime.sim._articulation import JointCommand as ArticulatedCommand
 from arena_runtime.sim._control import (
     effective_control_yaml,
     odom_relay_node,
@@ -331,6 +335,7 @@ class GazeboHost(SimLifecycle):
 
 class GazeboSimulator(BaseSim):
     SIM_NAME = 'gazebo'
+    ARTICULATED_PHYSICS = True
 
     def __init__(self, **kwargs: typing.Unpack[SimKwargs]) -> None:
         super().__init__(**kwargs)
@@ -353,6 +358,8 @@ class GazeboSimulator(BaseSim):
         self._spawned_names: set[str] = set()
         self._entity_ids: dict[str, int] = {}
         self._id_wanted: set[str] = set()
+        self._joint_commands: dict[str, gz.transport13.Publisher] = {}
+        self._joint_states: dict[str, list[float]] = {}
 
         # gz leaves a model unactuated after a SetEntityPose issued while the
         # world is paused; re-issuing the same pose once it runs wakes it.
@@ -445,7 +452,14 @@ class GazeboSimulator(BaseSim):
         return success
 
     async def obstacle_move(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
-        return await asyncio.gather(*map(self._move_entity, obstacles))
+        async def move(obstacle: Obstacle) -> bool:
+            runtime = self._articulated.get(obstacle.name)
+            if runtime is None or not runtime.physical:
+                return await self._move_entity(obstacle)
+            await self._delete_entity(obstacle.sim_path)
+            return (await self._articulated_spawn([runtime]))[0]
+
+        return await asyncio.gather(*map(move, obstacles))
 
     async def pedestrian_move(self, pedestrians: Sequence[DynamicObstacle]) -> Sequence[bool]:
         # Ped pose is owned by PedSkeletonPlugin (driven from the arena_peds topic).
@@ -470,7 +484,41 @@ class GazeboSimulator(BaseSim):
         await asyncio.gather(*map(self._move_entity, robots))
 
     async def obstacle_delete(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
+        for obstacle in obstacles:
+            if self._joint_commands.pop(obstacle.sim_path, None) is not None:
+                self._gz_node.unsubscribe(_joint_topic(obstacle.sim_path, "state"))
+                self._joint_states.pop(obstacle.sim_path, None)
         return await asyncio.gather(*(self._delete_entity(o.sim_path) for o in obstacles))
+
+    async def _articulated_spawn(self, objects: Sequence[ArticulatedObject]) -> Sequence[bool]:
+        async def spawn(runtime: ArticulatedObject) -> bool:
+            obstacle = runtime.obstacle
+            links: list[tuple[str, Joint | None, Path | None]] = []
+            for link, joint in runtime.tree():
+                view = runtime.links.get(link)
+                model = await view.model.get(ModelType.SDF) if view is not None else None
+                links.append((link, joint, _sdf_file(model.path) if model is not None and model.type is ModelType.SDF and model.path is not None else None))
+            name = obstacle.sim_path
+            self._joint_states.pop(name, None)
+            if name not in self._joint_commands:
+                self._joint_commands[name] = self._gz_node.advertise(_joint_topic(name, "command"), double_v_pb2.Double_V)
+                self._gz_node.subscribe(double_v_pb2.Double_V, _joint_topic(name, "state"), lambda msg, name=name: self._joint_states.__setitem__(name, list(msg.data)))
+            async with self._semaphore:
+                return await self._spawn_sdf(name, _articulated_sdf(name, runtime, links), obstacle.pose)
+
+        return await asyncio.gather(*map(spawn, objects))
+
+    async def _articulated_drive(self, commands: Sequence[ArticulatedCommand]) -> Sequence[Values | None]:
+        readings: list[Values | None] = []
+        for command in commands:
+            name = command.runtime.obstacle.sim_path
+            fields = command_fields(command)
+            message = double_v_pb2.Double_V(data=[value for triple in zip(fields["reference"], fields["drive"], fields["place"], strict=True) for value in map(float, triple)])
+            if (publisher := self._joint_commands.get(name)) is not None:
+                publisher.publish(message)
+            state = self._joint_states.get(name)
+            readings.append(None if state is None or len(state) != len(fields["joints"]) else dict(zip(fields["joints"], state, strict=True)))
+        return readings
 
     async def pedestrian_delete(self, pedestrians: Sequence[DynamicObstacle]) -> Sequence[bool]:
         # PedSkeletonPlugin removes a ped's actor when its name leaves arena_peds.
@@ -1318,6 +1366,7 @@ def _generate_floor_sdf(name: str, floor: Floor, textures: dict[str, str]) -> st
                                 <size>{floor.x_length} {floor.y_length} {collision_depth}</size>
                             </box>
                         </geometry>
+                        <surface><contact><collide_bitmask>{_FLOOR_BITMASK:#x}</collide_bitmask></contact></surface>
                     </collision>
                     <pose>{floor.pos.x} {floor.pos.y} {floor.pos.z} 0 0 0</pose>
                 </link>
@@ -1359,6 +1408,9 @@ _GLOW_VISUAL_PREFIX = 'glow_'
 _GZ_GLOW_RESPONSE = 0.65
 _LIGHT_LINK_TIMEOUT = 5.0
 _GZ_AMBIENT_ENV = 'env_0'
+_WORLD_PIN = 'arena_world_pin'
+_FLOOR_BITMASK = 0x01
+_MOVING_LINK_BITMASK = 0xFFFE
 _GZ_DEFAULT_LIGHTS = (
     ('sun', (-1.0, 0.0, -0.35)),
     ('fill_west', (1.0, 0.0, -0.35)),
@@ -1486,6 +1538,67 @@ def _light_request(name: str, p: dict[str, typing.Any]) -> light_pb2.Light:
         msg.spot_outer_angle = p['cone']
         msg.spot_falloff = 1.0
     return msg
+
+
+def _joint_topic(model: str, kind: str) -> str:
+    return f"/model/{model}/articulated/{kind}"
+
+
+def _link_geometry(link: str, sdf: Path | None, scale: Scale | None) -> str:
+    """The visuals and collisions of a link bundle's SDF, mesh uris made absolute and scaled, renamed under the link."""
+    if sdf is None:
+        return ""
+    factors = "1 1 1" if scale is None else f"{scale.x} {scale.y} {scale.z}"
+    parts: list[str] = []
+    source = xml.etree.ElementTree.parse(sdf).getroot().find(".//link")
+    for index, element in enumerate(source if source is not None else ()):
+        if element.tag not in ("visual", "collision"):
+            continue
+        element.set("name", f"{link}_{element.tag}_{index}")
+        for mesh in element.iter("mesh"):
+            uri = mesh.find("uri")
+            if uri is not None and uri.text and "://" not in uri.text and not uri.text.startswith("/"):
+                uri.text = str(sdf.parent / uri.text)
+            for old in mesh.findall("scale"):
+                mesh.remove(old)
+            xml.etree.ElementTree.SubElement(mesh, "scale").text = factors
+        parts.append(xml.etree.ElementTree.tostring(element, encoding="unicode"))
+    return "".join(parts)
+
+
+def _articulated_sdf(name: str, runtime: ArticulatedObject, links: Sequence[tuple[str, Joint | None, Path | None]]) -> str:
+    """A model of one link per articulation link at the model frame, the root fixed to the world, damped rubbing joints and an ArticulatedDrive over the movable ones."""
+    root = runtime.articulation.root
+    scale = runtime.obstacle.scale
+    factors = (1.0, 1.0, 1.0) if scale is None else (scale.x, scale.y, scale.z)
+    body: list[str] = [f'<joint name="{_WORLD_PIN}" type="fixed"><parent>world</parent><child>{root}</child></joint>']
+    drives: list[str] = []
+    for link, joint, sdf in links:
+        inertia = runtime.inertias[link]
+        cx, cy, cz = inertia.center
+        ixx, iyy, izz = inertia.moments
+        geometry = _link_geometry(link, sdf, scale)
+        if joint is not None:
+            geometry = geometry.replace("</collision>", f"<surface><contact><collide_bitmask>{_MOVING_LINK_BITMASK:#x}</collide_bitmask></contact></surface></collision>")
+        body.append(f'<link name="{link}"><inertial><pose>{cx} {cy} {cz} 0 0 0</pose><mass>{inertia.mass}</mass><inertia><ixx>{ixx}</ixx><iyy>{iyy}</iyy><izz>{izz}</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>{geometry}</link>')
+        if joint is None:
+            continue
+        ox, oy, oz = (component * factor for component, factor in zip(joint.origin, factors, strict=True))
+        if joint.type is JointType.FIXED:
+            body.append(f'<joint name="{joint.name}" type="fixed"><parent>{joint.parent}</parent><child>{link}</child></joint>')
+            continue
+        dynamics = runtime.dynamics[joint.name]
+        lower, upper = joint.limit if joint.limit is not None else (-1e16, 1e16)
+        kind = "prismatic" if joint.type is JointType.PRISMATIC else "revolute"
+        body.append(
+            f'<joint name="{joint.name}" type="{kind}"><parent>{joint.parent}</parent><child>{link}</child><pose>{ox} {oy} {oz} 0 0 0</pose>'
+            f'<axis><xyz expressed_in="__model__">{joint.axis.x} {joint.axis.y} {joint.axis.z}</xyz><limit><lower>{lower}</lower><upper>{upper}</upper></limit>'
+            f"<dynamics><damping>{dynamics.damping}</damping><friction>{dynamics.friction}</friction></dynamics></axis></joint>"
+        )
+        wraps = "true" if joint.type is JointType.CONTINUOUS else "false"
+        drives.append(f'<joint name="{joint.name}" stiffness="{dynamics.stiffness}" damping="{dynamics.drive_damping}" effort="{dynamics.effort}" wraps="{wraps}" initial="{runtime.current[joint.name]}"/>')
+    plugin = f'<plugin filename="ArticulatedDrive" name="arena_gz_plugins::ArticulatedDrive">{"".join(drives)}</plugin>'
+    return f'<?xml version="1.0"?><sdf version="1.9"><model name="{name}">{"".join(body)}{plugin}</model></sdf>'
 
 
 def _sdf_file(path: Path) -> Path:

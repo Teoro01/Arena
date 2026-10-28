@@ -62,7 +62,7 @@ Defined in [`_interface.py`](_interface.py):
 | `remove_elevators` | `(Sequence[str]) -> bool` | delete cabin geometry + synthesized door by name |
 | `stop_mechanisms` | `() -> None` | cancel the tick loop (call on shutdown) |
 | `attach_human_simulator` | `(HumanSimulator) -> None` | bind the human-sim Protocol that supplies ped positions + ped teleport |
-| `spawn_objects` | `(Sequence[Obstacle]) -> Sequence[bool]` | spawn obstacles, an articulated one as its link obstacles (see [Articulated objects](#articulated-objects)) |
+| `spawn_objects` | `(Sequence[Obstacle]) -> Sequence[bool]` | spawn obstacles, an articulated one as a physics model or its link obstacles (see [Articulated objects](#articulated-objects)) |
 | `move_objects` | `(Sequence[Obstacle]) -> Sequence[bool]` | move obstacles, an articulated one reset to the initial values of its `joints` |
 | `delete_objects` | `(Sequence[Obstacle]) -> Sequence[bool]` | delete obstacles, an articulated one with its link obstacles and semantics |
 
@@ -141,17 +141,15 @@ The human simulator places every static obstacle through `spawn_objects`,
 `move_objects` and `delete_objects` ([`_articulation.py`](_articulation.py)),
 which hand a plain obstacle unchanged to the simulator's `obstacle_*` verb.
 An obstacle whose object annotation carries `articulation:` and that has link
-bundles (`links/<link>/` under the object) expands into one static obstacle
-per link bundle, named and sim-pathed `<obstacle>__<link>`, its model the link
+bundles (`links/<link>/` under the object) spawns as a physics model in a
+simulator with `ARTICULATED_PHYSICS` (MuJoCo, Isaac, Gazebo, see below) and
+otherwise (flatsim, dummy) expands into one static obstacle per link bundle, named and sim-pathed `<obstacle>__<link>`, its model the link
 bundle, posed at `obstacle.pose * link_pose` with the link translation scaled
 componentwise by `obstacle.scale` and the scale kept on the link. Each call
 sends all its obstacles to the simulator in one batch. Links without meshes
-have no bundle and no obstacle. MuJoCo spawns a link from the bundle's SDF, as
-it does any object, not from the Y-up OBJ the bundle carries for the URDF.
-Every simulator thus moves joints through the
-`obstacle_move` it already has, MuJoCo and Isaac keep the box center offset of
-a box-spawned obstacle when it moves, flatsim places each outline at the z
-span of the link box through its full pose.
+have no bundle and no obstacle. These simulators move joints through the
+`obstacle_move` they already have, flatsim places each outline at the z span
+of the link box through its full pose.
 
 Each articulated obstacle keeps initial (`articulation.resolve(obstacle.joints)`),
 current and target joint values. A `move_objects` call, which is how the human
@@ -171,6 +169,36 @@ for its fields. A light whose `owner` is an articulated obstacle and whose
 carries its spawn pose through the link motion at the current joint values
 (`link_light_pose`) and moves it through `_move_light` with the yaw of that
 motion, on the same tick that steps the joints.
+
+A physics simulator implements `_articulated_spawn` and `_articulated_drive`.
+`make_physical` derives each link's mass, center and principal moments from
+its box (`link_inertias`: `DENSITY` 150 kg/m3 clamped to `MASS_RANGE`, a link
+without a box a 0.05 kg point at its joint) and each movable joint's
+`JointDynamics` (`joint_dynamics`): passive damping, friction raised to
+`HOLD_MARGIN` times the worst static gravity load over the joint's range,
+armature, a drive effort `EFFORT_PER_FRICTION` times the friction with the
+`ANGULAR`/`LINEAR` floors, a stiffness saturating at the tuning's gap and a
+drive damping critical on the inertia the joint moves. `_articulated_spawn`
+builds the model from them, its root fixed at the obstacle pose and the
+links nested at the model frame, contacts within the object and with the
+floor off. `move_objects` and `delete_objects` hand the object itself to
+`obstacle_move` and `obstacle_delete` (Gazebo respawns a moved one) and
+place its joints at the initial values. On each tick `_articulated_drive`
+gets one `JointCommand` per object: a semantic write
+(`ArticulatedObject.command`) marks the joints it moves as driving, each
+driving joint's reference ramps toward its target at the joint's speed but
+at most `LEAD` (0.25 s of motion) ahead of the joint, and a joint within its
+settle gap leaves the drive and is set onto its target (`place`). The
+reading that comes back is the current value, clamped into each joint's
+range, a joint no drive holds takes its target along, and `blocked` holds
+while a driving joint lags its reference by `LAG_BLOCKED` of the lead. A
+command whose placement got no reading is placed again on the next tick.
+
+| Simulator | Model | Drive and reading |
+| --- | --- | --- |
+| MuJoCo | `/mujoco/SpawnArticulated`: one body tree with hinge or slide joints, explicit inertia, the link meshes and their convex pieces, contacts excluded within the object and with the world body | `/mujoco/DriveArticulated`: one position actuator per joint, gains switched in the compiled model and the spec, `qpos` read back in the same call |
+| Isaac | `/isaac/SpawnArticulated`: a fixed-base articulation of rigid bodies referencing the link USDs, their meshes colliding through convex decomposition, revolute or prismatic joints with drives, self collision off, floor colliders filtered | `/isaac/DriveArticulated`: DOF gains, friction efforts, armature and targets through the articulation view once physics has parsed it |
+| Gazebo | an SDF model with the root joined to the world, link geometry from the link SDFs, moving links masked off the floor (`collide_bitmask`) | the `ArticulatedDrive` system of arena_gz_plugins on `/model/<name>/articulated/command` and `/state` (gz transport, `gz.msgs.Double_V`) |
 
 ### `SimLifecycle`
 

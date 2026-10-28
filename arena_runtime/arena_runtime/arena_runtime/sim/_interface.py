@@ -25,6 +25,9 @@ from task_generator.shared import (
 if typing.TYPE_CHECKING:
     import arena_robots.Robot
     from arena_rclpy_mixins import ArenaMixinNode
+    from arena_simulation_setup.utils.articulation import Values
+
+    from ._articulation import ArticulatedObject, JointCommand
 
 
 _BOX_FLOOR_CLEARANCE = 0.01  # keep the box base off the floor plane to avoid z-fight / poke-through
@@ -302,6 +305,7 @@ class MechanismITF:
         async def obstacle_delete(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]: ...
 
     SIM_NAME: typing.ClassVar[str]
+    ARTICULATED_PHYSICS: typing.ClassVar[bool] = False
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
@@ -398,6 +402,14 @@ class MechanismITF:
         from ._articulation import delete_objects
 
         return await delete_objects(self, obstacles)
+
+    async def _articulated_spawn(self, objects: "Sequence[ArticulatedObject]") -> Sequence[bool]:
+        """Spawn each object as one physics model at its obstacle's pose, links with their inertias, joints at their current values with their dynamics and drives off."""
+        raise NotImplementedError(f"{self.SIM_NAME} has no articulated physics")
+
+    async def _articulated_drive(self, commands: "Sequence[JointCommand]") -> "Sequence[Values | None]":
+        """Set the placed joints onto their reference at rest, switch each joint's drive on toward its reference or off, then read every movable joint, None for an object the simulator lost."""
+        raise NotImplementedError(f"{self.SIM_NAME} has no articulated physics")
 
     async def spawn_lights(self, lights: Sequence[Light]) -> bool:
         """Spawn lights, their semantic output reaches the renderer on the mechanism tick."""

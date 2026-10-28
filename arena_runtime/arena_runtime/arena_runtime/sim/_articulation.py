@@ -1,13 +1,15 @@
-"""Articulated objects in every simulator: one obstacle per link bundle, joints moved kinematically on the mechanism tick."""
+"""Articulated objects in every simulator: physics bodies with driven joints where the simulator has them, else one obstacle per link bundle moved kinematically on the mechanism tick."""
 
 from __future__ import annotations
 
 import asyncio
 import math
 import typing
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 import attrs
+import geometry_msgs.msg
+import numpy as np
 from arena_simulation_setup.tree.assets.Object import ObjectIdentifier, ObjectView
 from arena_simulation_setup.utils.articulation import Articulation, Joint, JointType, Values
 from task_generator.shared import Obstacle, Pose, Position
@@ -20,9 +22,68 @@ if typing.TYPE_CHECKING:
 
 LINK_SEPARATOR = '__'
 JOINT_TOLERANCE = 1e-6
+GRAVITY = 9.81
+DENSITY = 150.0
+MASS_RANGE = (0.2, 20.0)
+BARE_LINK_MASS = 0.05
+MIN_INERTIA = 1e-4
+HOLD_MARGIN = 1.2
+EFFORT_PER_FRICTION = 3.0
+LEAD = 0.25
+LAG_BLOCKED = 0.9
+MOTION_TOLERANCE = 1e-3
+JOINT_CODES = {JointType.REVOLUTE: 0, JointType.PRISMATIC: 1, JointType.CONTINUOUS: 2, JointType.FIXED: 3}
 
 Disc = tuple[str, tuple[float, float], float]
 Point = tuple[float, float]
+
+
+@attrs.frozen
+class DriveTuning:
+    """Passive and drive constants of one joint kind, the friction and effort floors before gravity raises them."""
+
+    damping: float
+    friction: float
+    effort: float
+    saturation: float
+    settle: float
+    armature: float = 0.01
+
+
+ANGULAR = DriveTuning(damping=0.5, friction=0.2, effort=10.0, saturation=0.1, settle=0.05)
+LINEAR = DriveTuning(damping=5.0, friction=2.0, effort=40.0, saturation=0.02, settle=0.01)
+
+
+@attrs.frozen
+class LinkInertia:
+    """Mass, center of mass in the model frame and principal moments along the model axes of one link."""
+
+    mass: float
+    center: tuple[float, float, float]
+    moments: tuple[float, float, float]
+
+
+@attrs.frozen
+class JointDynamics:
+    """Passive damping, friction and armature of a joint, its drive's effort limit, stiffness and damping, and the gap within which a drive snaps onto its target."""
+
+    damping: float
+    friction: float
+    armature: float
+    effort: float
+    stiffness: float
+    drive_damping: float
+    settle: float
+
+
+@attrs.frozen
+class JointCommand:
+    """One object's drive references, the joints whose drives are on, and the joints set onto their reference at rest."""
+
+    runtime: ArticulatedObject
+    reference: Values
+    drive: frozenset[str]
+    place: frozenset[str]
 
 
 def joint_gap(joint: Joint, current: float, target: float) -> float:
@@ -91,10 +152,27 @@ class ArticulatedObject:
     target: Values
     blocked: bool = False
     placed: bool = True
+    physical: bool = False
+    inertias: dict[str, LinkInertia] = attrs.field(factory=dict)
+    dynamics: dict[str, JointDynamics] = attrs.field(factory=dict)
+    driving: set[str] = attrs.field(factory=set)
+    reference: Values = attrs.field(factory=dict)
+    motion: bool = False
 
     @property
     def moving(self) -> bool:
+        if self.physical:
+            return bool(self.driving) or self.motion
         return any(abs(joint_gap(joint, self.current[joint.name], self.target[joint.name])) > JOINT_TOLERANCE for joint in self.articulation.movable)
+
+    def command(self, target: Values) -> None:
+        """New joint targets, the joints they move driven toward them from where they are."""
+        for joint in self.articulation.movable:
+            name = joint.name
+            if abs(joint_gap(joint, self.target[name], target[name])) > JOINT_TOLERANCE and name not in self.driving:
+                self.driving.add(name)
+                self.reference[name] = self.current[name]
+        self.target = dict(target)
 
     def reset(self) -> None:
         """Current and target back to the initial values, the links placed again on the next tick."""
@@ -102,6 +180,9 @@ class ArticulatedObject:
         self.target = dict(self.initial)
         self.blocked = False
         self.placed = False
+        self.driving.clear()
+        self.reference = dict(self.initial)
+        self.motion = False
 
     def advance(self, dt: float) -> Values:
         """Joint values one step of dt toward the target at each joint's speed."""
@@ -143,6 +224,105 @@ class ArticulatedObject:
         sx, sy, sz = (scale.x, scale.y, scale.z) if scale is not None else (1.0, 1.0, 1.0)
         corners = (pose * Position(x * sx, y * sy, z * sz) for x in box[0] for y in box[1] for z in box[2])
         return hull([(corner.x, corner.y) for corner in corners])
+
+    def tree(self) -> list[tuple[str, Joint | None]]:
+        """Every link with the joint to its parent, parents first, the root with None."""
+        return [(self.articulation.root, None), *((joint.child, joint) for joint in self.articulation.order())]
+
+    def make_physical(self) -> None:
+        """Derive the link inertias and joint dynamics a physics simulator builds the object from."""
+        self.physical = True
+        self.inertias = link_inertias(self.articulation, self.links, self.obstacle.scale)
+        self.dynamics = joint_dynamics(self.articulation, self.inertias, self.obstacle.scale)
+        self.reference = dict(self.current)
+
+
+def _scales(scale: Scale | None) -> np.ndarray:
+    return np.ones(3) if scale is None else np.array([scale.x, scale.y, scale.z], dtype=np.float64)
+
+
+def link_inertias(articulation: Articulation, links: Mapping[str, ObjectView], scale: Scale | None) -> dict[str, LinkInertia]:
+    """Each link a solid box of its scaled annotated extent at DENSITY, mass clamped into MASS_RANGE, a link without a box a small point mass at its joint."""
+    factors = _scales(scale)
+    origins = {joint.child: np.array(list(joint.origin)) * factors for joint in articulation.joints}
+    result: dict[str, LinkInertia] = {}
+    for link in articulation.links:
+        view = links.get(link)
+        box = view.extent if view is not None else None
+        if box is None:
+            center = origins.get(link, np.zeros(3))
+            result[link] = LinkInertia(BARE_LINK_MASS, (float(center[0]), float(center[1]), float(center[2])), (MIN_INERTIA, MIN_INERTIA, MIN_INERTIA))
+            continue
+        low, high = np.sort(np.array(box, dtype=np.float64).T * factors, axis=0)
+        size = high - low
+        mass = float(np.clip(DENSITY * np.prod(size), *MASS_RANGE))
+        x, y, z = (float(side) ** 2 for side in size)
+        center = (low + high) / 2
+        result[link] = LinkInertia(
+            mass,
+            (float(center[0]), float(center[1]), float(center[2])),
+            (max(mass / 12 * (y + z), MIN_INERTIA), max(mass / 12 * (x + z), MIN_INERTIA), max(mass / 12 * (x + y), MIN_INERTIA)),
+        )
+    return result
+
+
+def _subtree(articulation: Articulation, link: str) -> list[str]:
+    links = [link]
+    for joint in articulation.order():
+        if joint.parent in links:
+            links.append(joint.child)
+    return links
+
+
+def _samples(joint: Joint) -> list[float]:
+    low, high = joint.bounds
+    return [float(value) for value in np.linspace(low, high, 9)]
+
+
+def joint_dynamics(articulation: Articulation, inertias: Mapping[str, LinkInertia], scale: Scale | None) -> dict[str, JointDynamics]:
+    """Per movable joint: friction holding the joint against its worst static gravity load over its range, an effort beating that friction, a drive saturating at the tuning's gap and critically damped on the moved inertia."""
+    factors = _scales(scale)
+    weight = np.array([0.0, 0.0, -GRAVITY])
+    result: dict[str, JointDynamics] = {}
+    for joint in articulation.movable:
+        tuning = LINEAR if joint.type is JointType.PRISMATIC else ANGULAR
+        subtree = _subtree(articulation, joint.child)
+        mass = sum(inertias[link].mass for link in subtree)
+        load = 0.0
+        moved = 0.0
+        for value in _samples(joint):
+            poses = {link: scaled(pose, scale) for link, pose in articulation.link_poses({joint.name: value}).items()}
+            parent = poses[joint.parent]
+            axis = np.array(list(parent.orientation * joint.axis))
+            if joint.type is JointType.PRISMATIC:
+                load = max(load, mass * GRAVITY * abs(axis[2]))
+                moved = mass
+                continue
+            origin = np.array(list(parent * Position(*(np.array(list(joint.origin)) * factors))))
+            torque = 0.0
+            inertia = 0.0
+            for link in subtree:
+                body = inertias[link]
+                center = np.array(list(poses[link] * Position(*body.center)))
+                lever = center - origin
+                torque += float(np.dot(np.cross(lever, body.mass * weight), axis))
+                along = np.array(list(poses[link].orientation.inverse() * Position(*axis)))
+                inertia += body.mass * float(np.dot(lever, lever) - np.dot(lever, axis) ** 2) + float(np.dot(along**2, body.moments))
+            load = max(load, abs(torque))
+            moved = max(moved, inertia)
+        friction = max(tuning.friction, HOLD_MARGIN * load)
+        effort = max(tuning.effort, EFFORT_PER_FRICTION * friction)
+        stiffness = effort / tuning.saturation
+        result[joint.name] = JointDynamics(
+            damping=tuning.damping,
+            friction=friction,
+            armature=tuning.armature,
+            effort=effort,
+            stiffness=stiffness,
+            drive_damping=2.0 * math.sqrt(stiffness * (moved + tuning.armature)),
+            settle=tuning.settle,
+        )
+    return result
 
 
 def link_light_pose(runtime: ArticulatedObject, light: Light) -> tuple[Position, float] | None:
@@ -218,17 +398,25 @@ async def spawn_objects(mech: MechanismITF, obstacles: Sequence[Obstacle]) -> li
 
     runtimes = await asyncio.gather(*map(resolve, obstacles))
     groups: list[Sequence[Obstacle] | None] = []
+    physical: list[ArticulatedObject] = []
     for obstacle, runtime in zip(obstacles, runtimes, strict=True):
         if isinstance(runtime, Exception):
             logger.error(f"articulated object {obstacle.name!r} not spawned: {runtime}")
             groups.append(None)
         elif runtime is None:
             groups.append([obstacle])
+        elif mech.ARTICULATED_PHYSICS:
+            runtime.make_physical()
+            physical.append(runtime)
+            groups.append(())
         else:
             groups.append(runtime.link_obstacles())
     results = await _dispatch(mech.obstacle_spawn, groups)
-    for runtime in runtimes:
-        if not isinstance(runtime, ArticulatedObject):
+    if physical:
+        spawned = dict(zip((id(runtime) for runtime in physical), await mech._articulated_spawn(physical), strict=True))
+        results = [spawned.get(id(runtime), ok) for runtime, ok in zip(runtimes, results, strict=True)]
+    for runtime, ok in zip(runtimes, results, strict=True):
+        if not isinstance(runtime, ArticulatedObject) or (runtime.physical and not ok):
             continue
         if (replaced := mech._articulated.get(runtime.name)) is not None:
             mech._semantics.detach(replaced.entity)
@@ -240,6 +428,7 @@ async def spawn_objects(mech: MechanismITF, obstacles: Sequence[Obstacle]) -> li
 
 async def move_objects(mech: MechanismITF, obstacles: Sequence[Obstacle]) -> list[bool]:
     groups: list[Sequence[Obstacle] | None] = []
+    physical: list[ArticulatedObject] = []
     for obstacle in obstacles:
         runtime = mech._articulated.get(obstacle.name)
         if runtime is None:
@@ -251,9 +440,16 @@ async def move_objects(mech: MechanismITF, obstacles: Sequence[Obstacle]) -> lis
             mech.node.get_logger().error(f"articulated object {obstacle.name!r} keeps its initial joint values: {e}")
         runtime.obstacle = obstacle
         runtime.reset()
+        if runtime.physical:
+            groups.append([obstacle])
+            physical.append(runtime)
+            continue
         runtime.placed = True
         groups.append(runtime.link_obstacles())
-    return await _dispatch(mech.obstacle_move, groups)
+    results = await _dispatch(mech.obstacle_move, groups)
+    if physical:
+        await _drive(mech, [place(runtime) for runtime in physical])
+    return results
 
 
 async def delete_objects(mech: MechanismITF, obstacles: Sequence[Obstacle]) -> list[bool]:
@@ -264,14 +460,114 @@ async def delete_objects(mech: MechanismITF, obstacles: Sequence[Obstacle]) -> l
             groups.append([obstacle])
             continue
         mech._semantics.detach(runtime.entity)
-        groups.append(runtime.link_obstacles())
+        groups.append([obstacle] if runtime.physical else runtime.link_obstacles())
     return await _dispatch(mech.obstacle_delete, groups)
 
 
+def link_message[M](message: M, runtime: ArticulatedObject, link: str, joint: Joint | None, dynamics: Callable[..., typing.Any]) -> M:
+    """Fill a simulator's ArticulatedLink message with a link's name, inertia and the scaled joint to its parent, dynamics building its JointDynamics."""
+    inertia = runtime.inertias[link]
+    fields = typing.cast(typing.Any, message)
+    fields.name = link
+    fields.mass = inertia.mass
+    fields.center = geometry_msgs.msg.Point(x=inertia.center[0], y=inertia.center[1], z=inertia.center[2])
+    fields.moments = geometry_msgs.msg.Vector3(x=inertia.moments[0], y=inertia.moments[1], z=inertia.moments[2])
+    if joint is None:
+        return message
+    origin = np.array(list(joint.origin)) * _scales(runtime.obstacle.scale)
+    fields.parent = joint.parent
+    fields.joint = joint.name
+    fields.type = JOINT_CODES[joint.type]
+    fields.origin = geometry_msgs.msg.Point(x=float(origin[0]), y=float(origin[1]), z=float(origin[2]))
+    fields.axis = geometry_msgs.msg.Vector3(x=joint.axis.x, y=joint.axis.y, z=joint.axis.z)
+    fields.lower, fields.upper = joint.bounds
+    fields.value = runtime.current.get(joint.name, 0.0)
+    if (values := runtime.dynamics.get(joint.name)) is not None:
+        fields.dynamics = dynamics(
+            damping=values.damping,
+            friction=values.friction,
+            armature=values.armature,
+            effort=values.effort,
+            stiffness=values.stiffness,
+            drive_damping=values.drive_damping,
+        )
+    return message
+
+
+def command_fields(command: JointCommand) -> dict[str, list]:
+    """A simulator JointCommand message's per-joint lists over the object's movable joints."""
+    joints = [joint.name for joint in command.runtime.articulation.movable]
+    return {
+        "joints": joints,
+        "reference": [command.reference[joint] for joint in joints],
+        "drive": [joint in command.drive for joint in joints],
+        "place": [joint in command.place for joint in joints],
+    }
+
+
+def place(runtime: ArticulatedObject) -> JointCommand:
+    """Every joint set onto its current value at rest, drives off."""
+    runtime.placed = True
+    runtime.reference = dict(runtime.current)
+    return JointCommand(runtime, dict(runtime.current), frozenset(), frozenset(joint.name for joint in runtime.articulation.movable))
+
+
+def drive(runtime: ArticulatedObject, dt: float) -> JointCommand:
+    """Ramp each driven joint's reference toward its target at the joint's speed, at most LEAD seconds ahead of the joint, a joint within its settle gap released onto the target."""
+    reference = dict(runtime.current)
+    driven: set[str] = set()
+    settled: set[str] = set()
+    for joint in runtime.articulation.movable:
+        name = joint.name
+        if name not in runtime.driving:
+            continue
+        current, target = runtime.current[name], runtime.target[name]
+        if abs(joint_gap(joint, current, target)) <= runtime.dynamics[name].settle:
+            runtime.driving.discard(name)
+            reference[name] = target
+            settled.add(name)
+            continue
+        step = joint.speed * dt
+        previous = runtime.reference.get(name, current)
+        gap = joint_gap(joint, previous, target)
+        ramped = target if abs(gap) <= step else previous + math.copysign(step, gap)
+        lead = joint.speed * LEAD
+        ahead = joint_gap(joint, current, ramped)
+        reference[name] = joint.clamp(current + max(-lead, min(lead, ahead)))
+        driven.add(name)
+    runtime.reference = reference
+    return JointCommand(runtime, reference, frozenset(driven), frozenset(settled))
+
+
+def take_reading(runtime: ArticulatedObject, values: Values) -> None:
+    """Measured joint values in, clamped into each joint's range, the targets of joints no drive holds following them, blocked when a drive lags its reference by the whole lead."""
+    movable = [joint for joint in runtime.articulation.movable if joint.name in values]
+    measured = {joint.name: joint.clamp(values[joint.name]) for joint in movable}
+    runtime.motion = any(abs(joint_gap(joint, runtime.current[joint.name], measured[joint.name])) > MOTION_TOLERANCE for joint in movable)
+    runtime.current = {**runtime.current, **measured}
+    for joint in movable:
+        if joint.name not in runtime.driving:
+            runtime.target[joint.name] = measured[joint.name]
+    runtime.blocked = any(abs(joint_gap(joint, measured[joint.name], runtime.reference[joint.name])) >= LAG_BLOCKED * joint.speed * LEAD for joint in movable if joint.name in runtime.driving)
+
+
+async def _drive(mech: MechanismITF, commands: Sequence[JointCommand]) -> None:
+    readings = await mech._articulated_drive(commands)
+    for command, reading in zip(commands, readings, strict=True):
+        if reading is not None:
+            take_reading(command.runtime, reading)
+        elif command.place:
+            command.runtime.placed = False
+
+
 async def step_articulated(mech: MechanismITF, dt: float, discs: Sequence[Disc]) -> None:
-    """Move every articulated object one tick toward its target, holding one whose moving links would enter an agent disc."""
+    """Move every articulated object one tick toward its target: drive a physical one's joints and read them back, move a kinematic one's links unless they would enter an agent disc."""
     batch: list[Obstacle] = []
+    commands: list[JointCommand] = []
     for runtime in list(mech._articulated.values()):
+        if runtime.physical:
+            commands.append(drive(runtime, dt) if runtime.placed else place(runtime))
+            continue
         if not runtime.placed:
             runtime.placed = True
             batch.extend(runtime.link_obstacles())
@@ -292,3 +588,5 @@ async def step_articulated(mech: MechanismITF, dt: float, discs: Sequence[Disc])
         batch.extend(runtime.link_obstacle(link, after[link]) for link in moved)
     if batch:
         await mech.obstacle_move(batch)
+    if commands:
+        await _drive(mech, commands)

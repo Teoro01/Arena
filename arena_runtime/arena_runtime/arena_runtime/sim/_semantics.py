@@ -1063,7 +1063,7 @@ class ArticulatedSemantics(SemanticKind):
             raise ValueError('field not writable')
         runtime = self._runtime
         try:
-            runtime.target = runtime.articulation.target_for(field, value, runtime.target)
+            runtime.command(runtime.articulation.target_for(field, value, runtime.target))
         except ValueError:
             raise ValueError('malformed value') from None
 
