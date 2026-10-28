@@ -318,8 +318,8 @@ class Stairs(Named):
 
     @property
     def flat(self) -> float:
-        """Length of the level landing at the mouth, where step escalator treads run flush with the floor."""
-        return self.landing_length if self.kind == 'escalator' and self.style == 'steps' else 0.0
+        """Length of the level landing at the mouth, where escalator treads and planks run flush with the floor."""
+        return self.landing_length if self.kind == 'escalator' else 0.0
 
     @property
     def ramp(self) -> tuple[float, float]:
@@ -369,7 +369,7 @@ class Stairs(Named):
                     kind, material = self._style(side.kind, side.material)
                     walls.append(Wall(start=self.local(0.0, across), end=self.local(self.length, across), kind=kind, material=material, height=side.height))
                 continue
-            walls.extend(self._along_surface(across, ('', fixture), top=0.0, bottom=-(abs(self.height(self.length)) + self.riser + self.sink + STAIRS_BASE)))
+            walls.extend(self._along_surface(across, ('', fixture), top=0.0, bottom=-(abs(self.height(self.length)) + self.drop + STAIRS_BASE)))
             if side.height > 0.0:
                 walls.extend(self._along_surface(across, self._style(side.kind, side.material), height=side.height))
         if not self.joined:
@@ -390,7 +390,7 @@ class Stairs(Named):
         """Walls that do not block the floor plan: the open rails and an escalator's skirt brushes, a strip along each inner side just above the treads."""
         walls = [wall for rail in self.rails if not rail.solid for wall in self._rail(rail)]
         if self.kind == 'escalator':
-            lift = (self.riser if self.style == 'steps' else STAIRS_GAP + self.plank) + STAIRS_BRUSH_LIFT
+            lift = (self.riser if self.style == 'steps' else self._sag) + STAIRS_BRUSH_LIFT
             inner = self.width / 2.0 - STAIRS_BRUSH_DEPTH
             for across in (inner, -inner):
                 walls.extend(self._along_surface(across, ('', self.material_of('brushes')), top=lift + STAIRS_BRUSH, bottom=lift))
@@ -457,16 +457,40 @@ class Stairs(Named):
         return any(start < end - 1e-9 and start + self.pitch > begin + 1e-9 for begin, end in self.plate_zones)
 
     @property
-    def sink(self) -> float:
-        """How far a tread under a landing plate sits below its place, its top `STAIRS_SINK` under the plate's, which it passes through like a comb."""
+    def drop(self) -> float:
+        """Depth of the base slabs' top under the ramp line, clear of the lowest tread or plank."""
         if self.style == 'belt':
-            return STAIRS_SINK + STAIRS_GAP + self.plank + abs(math.tan(self.slope)) * 1.5 * self.pitch
-        return STAIRS_SINK
+            return STAIRS_SINK + 2.0 * STAIRS_GAP + self.plank / math.cos(self.slope) + self._sag
+        return self.riser + 2.0 * STAIRS_GAP
+
+    @property
+    def _sag(self) -> float:
+        """Most a belt plank's chord strays from the ramp line, over a knee of the ramp."""
+        return self.pitch * abs(math.tan(self.slope)) / 4.0
+
+    def _plate_level(self, start: float) -> float | None:
+        """Top of the landing plate the tread starting at `start` reaches under, None when it reaches under none."""
+        if not self.under_plate(start):
+            return None
+        return self.height(0.0) if start < self.length / 2.0 else self.height(self.length)
+
+    def _plank_top(self, along: float, start: float) -> float:
+        """Top of the belt plank starting at `start` at `along`, on the ramp line, capped `STAIRS_SINK` under a landing plate it reaches under."""
+        level = self._plate_level(start)
+        return self.height(along) if level is None else min(self.height(along), level) - STAIRS_SINK
+
+    def _plank_climb(self, along: float, start: float) -> float:
+        """Rate at which the top of the belt plank starting at `start` rises at `along` per metre of travel."""
+        ramp_start, ramp_end = self.ramp
+        level = self._plate_level(start)
+        if not ramp_start < along < ramp_end or (level is not None and self.height(along) >= level):
+            return 0.0
+        return self.height(self.length) / (ramp_end - ramp_start)
 
     def surface(self, along: float, travel: float = 0.0) -> float:
         """Walking surface height `along` metres from the mouth: the top of the tread there, the belt, or the base between treads."""
         if self.kind == 'escalator' and self.style == 'belt':
-            return self.height(along) + (STAIRS_GAP + self.plank) / math.cos(self.slope)
+            return self.height(along)
         for start, length in self.spans(travel):
             if start <= along <= start + length:
                 return max(self.height(start), self.height(start + length))
@@ -490,7 +514,7 @@ class Stairs(Named):
 
     def base(self) -> list[StairsBox]:
         """Static slabs of an escalator half just under the moving treads: one along the ramp, one under each landing and the pit before it."""
-        drop = self.sink + STAIRS_GAP if self.style == 'belt' else self.riser + 2.0 * STAIRS_GAP
+        drop = self.drop
         start, end = self.ramp
         span = (end - start) / math.cos(self.slope)
         middle = (start + end) / 2.0
@@ -555,8 +579,12 @@ class Stairs(Named):
         rate = self.height(self.length) / (ramp_end - ramp_start)
         velocities: list[tuple[float, float, float]] = []
         for start in self.tread_starts(travel):
+            if self.style == 'belt':
+                end = start + self.pitch - STAIRS_GAP
+                velocities.append((self.belt * ax, self.belt * ay, self.belt * (self._plank_climb(start, start) + self._plank_climb(end, start)) / 2.0))
+                continue
             edge = start if self.top else start + self.pitch
-            climbing = self.style == 'belt' or ramp_start < edge < ramp_end
+            climbing = ramp_start < edge < ramp_end
             velocities.append((self.belt * ax, self.belt * ay, self.belt * rate if climbing else 0.0))
         return velocities
 
@@ -565,12 +593,12 @@ class Stairs(Named):
         return min(c.x for c in corners), min(c.y for c in corners), max(c.x for c in corners), max(c.y for c in corners)
 
     def floor_openings(self) -> list[tuple[float, float, float, float]]:
-        """Rectangles (x_min, y_min, x_max, y_max) the half cuts out of its level's floor: a top half's well with its overhang, a step escalator's pit."""
+        """Rectangles (x_min, y_min, x_max, y_max) the half cuts out of its level's floor: a top half's well with its overhang, an escalator's pit."""
         pit = -(self.pitch + STAIRS_GAP) if self.kind == 'escalator' else 0.0
         if self.top:
             return [self._rect(pit, self.length + self.overhang)]
         if self.kind == 'escalator':
-            return [self._rect(pit, self.length if self.style == 'steps' else STAIRS_GAP + self.pitch)]
+            return [self._rect(pit, self.length)]
         return []
 
     def ceiling_openings(self) -> list[tuple[float, float, float, float]]:
@@ -587,23 +615,35 @@ class Stairs(Named):
         return body
 
     def treads(self, travel: float) -> list[StairsBox]:
-        """Moving escalator treads after the belt moved `travel` metres along the axis: step blocks, or planks of a belt, sunk under a landing plate while they reach under it."""
+        """Moving escalator treads after the belt moved `travel` metres along the axis: step blocks, or planks of a belt tilted along the chord of the ramp line under them, sunk under a landing plate while they reach under it."""
         pitch, width = self.pitch, self.width - 2.0 * STAIRS_CLEARANCE
         length = pitch - STAIRS_GAP
         boxes: list[StairsBox] = []
         for start in self.tread_starts(travel):
             middle = start + length / 2.0
-            sink = self.sink if self.under_plate(start) else 0.0
             if self.style == 'belt':
-                offset = STAIRS_GAP + self.plank / 2.0
-                center = self.local(middle - offset * math.sin(self.slope), 0.0, middle * math.tan(self.slope) + offset * math.cos(self.slope) - sink)
-                boxes.append(((length, width, self.plank), Pose(position=center, orientation=Orientation.from_euler((0.0, -self.slope, self.yaw)))))
+                boxes.append(self._plank(start, width))
                 continue
-            top = max(self.height(start), self.height(start + pitch)) - sink
+            top = max(self.height(start), self.height(start + pitch)) - (STAIRS_SINK if self.under_plate(start) else 0.0)
             thickness = self.riser - STAIRS_GAP
             center = self.local(middle, 0.0, top - thickness / 2.0)
             boxes.append(((length, width, thickness), Pose(position=center, orientation=Orientation.from_yaw(self.yaw))))
         return boxes
+
+    def _plank_tilt(self, start: float) -> float:
+        length = self.pitch - STAIRS_GAP
+        return math.atan2(self._plank_top(start + length, start) - self._plank_top(start, start), length)
+
+    def _plank(self, start: float, width: float) -> StairsBox:
+        """The belt plank starting at `start`: its top face from the ramp line there along the chord, cut short where the next plank tilts flatter so their faces never cross."""
+        length = self.pitch - STAIRS_GAP
+        low = self._plank_top(start, start)
+        tilt = self._plank_tilt(start)
+        cut = self.plank * math.tan(max(0.0, tilt - self._plank_tilt(start + self.pitch)))
+        span = length / math.cos(tilt) - cut
+        along = start + span / 2.0 * math.cos(tilt) + self.plank / 2.0 * math.sin(tilt)
+        z = low + span / 2.0 * math.sin(tilt) - self.plank / 2.0 * math.cos(tilt)
+        return (span, width, self.plank), Pose(position=self.local(along, 0.0, z), orientation=Orientation.from_euler((0.0, -tilt, self.yaw)))
 
 
 STOREY = 3.0

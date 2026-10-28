@@ -140,6 +140,23 @@ def _base_top(half: Stairs, along: float) -> float:
     return max(tops, default=-math.inf)
 
 
+def _profile(half: Stairs, box: StairsBox) -> list[tuple[float, float]]:
+    (sx, _, sz), _ = box
+    return [(half.along(point.x, point.y), point.z) for point in (_face(box, x, z) for x, z in ((-sx / 2.0, -sz / 2.0), (sx / 2.0, -sz / 2.0), (sx / 2.0, sz / 2.0), (-sx / 2.0, sz / 2.0)))]
+
+
+def _profiles_overlap(half: Stairs, a: StairsBox, b: StairsBox) -> bool:
+    """Whether two boxes' side profiles intersect, by separating axes."""
+    pa, pb = _profile(half, a), _profile(half, b)
+    for poly in (pa, pb):
+        for (x0, z0), (x1, z1) in itertools.pairwise([*poly, poly[0]]):
+            nx, nz = z0 - z1, x1 - x0
+            ra, rb = [x * nx + z * nz for x, z in pa], [x * nx + z * nz for x, z in pb]
+            if max(ra) <= min(rb) + 1e-12 or max(rb) <= min(ra) + 1e-12:
+                return False
+    return True
+
+
 @pytest.mark.parametrize('top', [False, True])
 @pytest.mark.parametrize('style', ['steps', 'belt'])
 def test_moving_treads_never_touch_the_base_the_floor_or_each_other(top: bool, style: typing.Literal['steps', 'belt']) -> None:
@@ -147,27 +164,29 @@ def test_moving_treads_never_touch_the_base_the_floor_or_each_other(top: bool, s
     for step in range(12):
         travel = step * half.pitch / 5.0
         boxes = half.treads(travel)
-        spans = sorted((min(half.along(c.x, c.y) for c in _corners(box)), max(half.along(c.x, c.y) for c in _corners(box))) for box in boxes)
-        assert all(end < start for (_, end), (start, _) in zip(spans, spans[1:], strict=False))
+        ordered = sorted(boxes, key=lambda box: half.along(box[1].position.x, box[1].position.y))
+        assert not any(_profiles_overlap(half, a, b) for a, b in itertools.pairwise(ordered))
         for box, start in zip(boxes, half.tread_starts(travel), strict=True):
             for corner in _corners(box):
                 assert corner.z > _base_top(half, half.along(corner.x, corner.y))
                 if half.under_plate(start):
                     assert corner.z <= half.height(0.0) - STAIRS_SINK + 1e-9
-                elif not top and style == 'belt':
-                    assert corner.z > 0.0
 
 
 @pytest.mark.parametrize('top', [False, True])
-def test_step_escalator_treads_run_level_with_the_floor_over_the_landing(top: bool) -> None:
-    half = Stairs(name='half', position=Position(10.3, 2.0), top=top, kind='escalator', to='other', size=[3.4, 1.0])
+@pytest.mark.parametrize('style', ['steps', 'belt'])
+def test_escalator_treads_and_planks_run_level_with_the_floor_over_the_landing(top: bool, style: typing.Literal['steps', 'belt']) -> None:
+    half = Stairs(name='half', position=Position(10.3, 2.0), top=top, kind='escalator', to='other', style=style, size=[3.4, 1.0])
     assert half.flat == half.landing_length == 0.8
     assert (half.height(0.0), half.height(half.flat), half.height(half.length)) == pytest.approx((0.0, 0.0, -1.5 if top else 1.5))
     assert math.tan(abs(half.slope)) == pytest.approx(1.5 / (half.length - half.flat))
-    for start in half.tread_starts(0.37):
+    level = 0
+    for box, start in zip(half.treads(0.37), half.tread_starts(0.37), strict=True):
         if not half.under_plate(start) and start + half.pitch <= half.flat:
+            level += 1
             assert half.surface(start + half.pitch / 2.0, 0.37) == pytest.approx(0.0)
-    assert _half(kind='escalator', style='belt').flat == 0.0
+            assert max(corner.z for corner in _corners(box)) == pytest.approx(0.0)
+    assert level
     assert _half().flat == 0.0
 
 
@@ -176,7 +195,7 @@ def test_treads_and_belt_planks_carry_the_walking_surface(top: bool) -> None:
     steps = _half(kind='escalator', to='other', top=top)
     for (size, pose), start in zip(steps.treads(0.3), steps.tread_starts(0.3), strict=True):
         if steps.under_plate(start):
-            assert pose.position.z + size[2] / 2.0 == pytest.approx(max(steps.height(start), steps.height(start + steps.pitch)) - steps.sink)
+            assert pose.position.z + size[2] / 2.0 == pytest.approx(max(steps.height(start), steps.height(start + steps.pitch)) - STAIRS_SINK)
             continue
         assert size == pytest.approx((steps.pitch - STAIRS_GAP, steps.width - 2.0 * STAIRS_CLEARANCE, steps.riser - STAIRS_GAP))
         assert pose.position.z + size[2] / 2.0 == pytest.approx(steps.surface(start + steps.pitch / 2.0, 0.3))
@@ -184,9 +203,14 @@ def test_treads_and_belt_planks_carry_the_walking_surface(top: bool) -> None:
     for box, start in zip(belt.treads(0.3), belt.tread_starts(0.3), strict=True):
         if belt.under_plate(start):
             continue
-        top_face = _face(box, 0.0, belt.plank / 2.0)
+        back = _face(box, -box[0][0] / 2.0, belt.plank / 2.0)
         assert box[0][2] == belt.plank
-        assert top_face.z == pytest.approx(belt.surface(belt.along(top_face.x, top_face.y)))
+        assert belt.along(back.x, back.y) == pytest.approx(start)
+        assert back.z == pytest.approx(belt.surface(start))
+
+
+def _quaternion(pose: Pose) -> tuple[float, float, float, float]:
+    return pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w
 
 
 @pytest.mark.parametrize('top', [False, True])
@@ -198,12 +222,17 @@ def test_tread_velocities_match_the_motion_of_the_treads(top: bool, style: typin
     for travel in (0.13, 0.71, 1.93):
         before, after = half.treads(travel), half.treads(travel + half.belt * dt)
         moving = zip(before, after, half.tread_velocities(travel), half.tread_starts(travel), half.tread_starts(travel + half.belt * dt), strict=True)
-        for (_, pose), (_, moved), velocity, start, then in moving:
+        checked = 0
+        for (size, pose), (resized, moved), velocity, start, then in moving:
             if abs(then - start) > 1.0 or half.under_plate(start) != half.under_plate(then):
                 continue
+            if size != pytest.approx(resized, abs=1e-12) or _quaternion(pose) != pytest.approx(_quaternion(moved), abs=1e-12):
+                continue
+            checked += 1
             step = ((moved.position.x - pose.position.x) / dt, (moved.position.y - pose.position.y) / dt, (moved.position.z - pose.position.z) / dt)
             assert velocity == pytest.approx(step, abs=1e-6)
             assert (velocity[0], velocity[1]) == pytest.approx((0.0, half.belt * half.axis[1]))
+        assert checked
 
 
 @pytest.mark.parametrize('top', [False, True])
@@ -212,8 +241,8 @@ def test_tread_velocities_match_the_motion_of_the_treads(top: bool, style: typin
 def test_base_runs_under_the_ramp_and_the_landing_from_mouth_to_seam(top: bool, mouth_side: Side, style: typing.Literal['steps', 'belt']) -> None:
     half = Stairs(name='half', position=Position(10.3, 2.0), mouth_side=mouth_side, top=top, kind='escalator', style=style, size=[3.4, 1.0])
     slabs = half.base()
-    assert len(slabs) == (2 if style == 'steps' else 1)
-    drop = half.sink + STAIRS_GAP if style == 'belt' else half.riser + 2.0 * STAIRS_GAP
+    assert len(slabs) == 2
+    drop = half.drop
     ends = []
     for index, box in enumerate(slabs):
         (span, width, thickness), _ = box
@@ -254,7 +283,7 @@ def test_walls_line_the_sides_under_the_walking_surface_raise_side_walls_above_i
     for wall in lining:
         assert wall.material is half.material_of('fixture')
         assert wall.top == 0.0
-        assert wall.bottom == (-half.rise / 2.0 if top else pytest.approx(-(half.rise / 2.0 + half.riser + half.sink + STAIRS_BASE)))
+        assert wall.bottom == (-half.rise / 2.0 if top else pytest.approx(-(half.rise / 2.0 + half.drop + STAIRS_BASE)))
         assert all(point.z == pytest.approx(0.0 if top else half.height(half.along(point.x, point.y))) for point in (wall.start, wall.end))
     for across in (half.width / 2.0, -half.width / 2.0):
         side = [wall for wall in above if half.across(wall.start.x, wall.start.y) == pytest.approx(across)]
@@ -318,15 +347,15 @@ def test_side_height_and_plank_thickness_follow_their_fields() -> None:
     assert [wall.height for wall in Stairs(name='w', position=Position(10.3, 2.0), top=True, sides=sides).walls() if wall.bottom is None] == [1.2]
     belt = Stairs(name='b', position=Position(10.3, 2.0), kind='escalator', style='belt', to='o', plank=0.05)
     assert {box[0][2] for box in belt.treads(0.2)} == {0.05}
-    assert belt.surface(1.0) == pytest.approx(belt.height(1.0) + (STAIRS_GAP + 0.05) / math.cos(belt.slope))
+    assert belt.surface(1.0) == pytest.approx(belt.height(1.0))
 
 
-def test_landing_length_sets_the_level_run_of_a_step_escalator_only() -> None:
-    steps = Stairs(name='e', position=Position(10.3, 2.0), kind='escalator', size=[4.0, 1.0], landing_length=1.2)
-    assert steps.flat == 1.2
-    assert steps.height(1.2) == 0.0
-    assert steps.height(4.0) == pytest.approx(1.5)
-    assert Stairs(name='b', position=Position(10.3, 2.0), kind='escalator', style='belt', landing_length=1.2).flat == 0.0
+@pytest.mark.parametrize('style', ['steps', 'belt'])
+def test_landing_length_sets_the_level_run_of_an_escalator_only(style: typing.Literal['steps', 'belt']) -> None:
+    escalator = Stairs(name='e', position=Position(10.3, 2.0), kind='escalator', style=style, size=[4.0, 1.0], landing_length=1.2)
+    assert escalator.flat == 1.2
+    assert escalator.height(1.2) == 0.0
+    assert escalator.height(4.0) == pytest.approx(1.5)
     assert Stairs(name='s', position=Position(10.3, 2.0), landing_length=1.2).flat == 0.0
 
 
@@ -349,9 +378,8 @@ def test_a_whole_stair_runs_the_joined_pair_as_one_body_from_mouth_to_mouth(kind
     assert min(starts) >= -body.pitch - 1e-9
     assert max(starts) + body.pitch <= body.length - STAIRS_GAP + body.pitch / 2.0 + 1e-9
     assert len(body.treads(0.37)) == body.tread_count
-    if style == 'steps':
-        assert body.height(body.length - body.flat) == pytest.approx(bottom.rise)
-        assert len(body.base()) == 3
+    assert body.height(body.length - body.flat) == pytest.approx(bottom.rise)
+    assert len(body.base()) == 3
 
 
 def test_landing_plates_lie_flush_with_the_floor_over_the_pits_and_the_wrap() -> None:
@@ -409,13 +437,19 @@ def test_an_escalator_dresses_its_base_as_fixture_and_its_plates_as_landings() -
     assert half.material_of('steps') is half.material
 
 
-def test_a_tread_under_a_plate_slides_out_one_millimetre_below_the_floor() -> None:
-    half = Stairs(name='e', position=Position(10.3, 2.0), kind='escalator', size=[3.4, 1.0], to='o')
-    assert half.sink == STAIRS_SINK == 0.001
-    assert STAIRS_GAP == 0.001
-    travel = half.pitch / 2.0
-    under = [box for box, start in zip(half.treads(travel), half.tread_starts(travel), strict=True) if half.under_plate(start)]
-    assert under and all(pose.position.z + size[2] / 2.0 == pytest.approx(-STAIRS_SINK) for size, pose in under)
+@pytest.mark.parametrize('style', ['steps', 'belt'])
+@pytest.mark.parametrize('whole', [False, True])
+def test_a_tread_under_a_plate_slides_out_one_millimetre_below_the_floor(style: typing.Literal['steps', 'belt'], whole: bool) -> None:
+    half = Stairs(name='e', position=Position(10.3, 2.0), kind='escalator', style=style, size=[3.4, 1.0], to='o')
+    if whole:
+        half.joined = True
+        half = half.whole_stair()
+    assert STAIRS_SINK == STAIRS_GAP == 0.001
+    under = [box for travel in (0.0, half.pitch / 3.0, half.pitch / 2.0) for box, start in zip(half.treads(travel), half.tread_starts(travel), strict=True) if half.under_plate(start)]
+    assert under
+    for box in under:
+        level = half.height(0.0) if half.along(box[1].position.x, box[1].position.y) < half.length / 2.0 else half.height(half.length)
+        assert max(corner.z for corner in _corners(box)) == pytest.approx(level - STAIRS_SINK)
 
 
 @pytest.mark.parametrize('style', ['steps', 'belt'])

@@ -132,9 +132,9 @@ how it splits into halves and opens floors, dressing and staircase kinds.
 | `exit` | none | spread worlds only and required there: middle of the open upper end on the `to` level |
 | `direction` | `up` | escalators only: `up` or `down` |
 | `speed` | `0.5` | escalator belt speed along the axis in m/s, positive |
-| `style` | `steps` | escalator treads: `steps` (moving step blocks, level with the floor over a `landing_length` landing at each mouth) or `belt` (an inclined conveyor of moving planks). Stairs take only `steps` |
+| `style` | `steps` | escalator treads: `steps` (moving step blocks) or `belt` (an inclined conveyor of moving planks), both level with the floor over a `landing_length` landing at each mouth. Stairs take only `steps` |
 | `tread` | `0.28` | step depth in metres a half aims for, positive: it takes `round(length / 2 / tread)` treads, stretched to fit |
-| `landing_length` | `0.8` | level run at each mouth of a step escalator, in `[0, length / 2)`. Stairs and belts ignore it |
+| `landing_length` | `0.8` | level run at each mouth of an escalator, in `[0, length / 2)`. Stairs ignore it |
 | `plank` | `0.03` | thickness of a belt escalator's moving planks, positive |
 | `headroom` | `2.1` | clearance under the upper floor below which a stacked stair opens it, positive |
 | `material` | `Marble` | `MaterialIdentifier` of every part of the staircase a key below does not set |

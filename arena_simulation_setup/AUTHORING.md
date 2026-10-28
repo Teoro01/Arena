@@ -290,7 +290,7 @@ its own, and the entry also takes `exit`.
 | --- | --- | --- | --- |
 | stairs | `atan(rise / length)` | 30 to 35 degrees | 5.2 m (30 degrees) |
 | step escalator | `atan(rise / (length - 2 * landing_length))` | 30 degrees | 6.8 m (30 degrees with 0.8 m landings) |
-| belt escalator | `atan(rise / length)` | up to 12 degrees | 14 m (12 degrees) |
+| belt escalator | `atan(rise / (length - 2 * landing_length))` | up to 12 degrees | 15.7 m (12 degrees with 0.8 m landings) |
 
 `width` is the distance between the center lines of the two side walls,
 which are 5 cm thick. Real stairs run 1.0 to 2.5 m wide and escalators 0.8 to
@@ -317,8 +317,8 @@ around a staircase by themselves:
   end of the bottom half where less than `headroom` (default 2.1 m) is left
   under it, with guard walls in the style of the sides around that overhang
   on the upper level,
-- the lower floor under a step escalator, whose treads run level with the
-  floor over a landing at each mouth (`landing_length`, default 0.8 m), and
+- the lower floor under an escalator, whose treads or planks run level with
+  the floor over a landing at each mouth (`landing_length`, default 0.8 m), and
   a short pit before each escalator mouth,
 - in a stacked world, the lower level's ceilings over the overhang and the
   top half.
@@ -326,9 +326,11 @@ around a staircase by themselves:
 Zone ceiling heights are measured from the level's own floor. The floor of
 the level above is a separate slab and does not stand in for a ceiling.
 
-An escalator's treads come out from under a landing plate flush with the
-floor at each mouth, 1 mm low until they clear it, then rise into place. The
-plate is a comb: treads pass through it, robots and pedestrians stand on it.
+An escalator's treads or planks come out from under a landing plate flush
+with the floor at each mouth, 1 mm low until they clear it, then run level
+over the landing and rise into place. A belt's planks tilt along the ramp and
+bend over its ends plank by plank. The plate is a comb: treads pass through
+it, robots and pedestrians stand on it.
 
 #### Dressing
 
@@ -483,8 +485,8 @@ levels:
 ```
 
 This is the `stairs_demo` world without its stair dressing: the belt rises
-3 m over 14 m (12 degrees), the stairs at 30 degrees and the step escalator
-at 30 degrees past its landings.
+3 m over 14 m (13.6 degrees past its landings), the stairs at 30 degrees and
+the step escalator at 30 degrees past its landings.
 
 #### Stacked levels
 
