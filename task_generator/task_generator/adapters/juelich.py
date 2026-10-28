@@ -81,6 +81,8 @@ def world_name(name: str, index: int) -> str:
 def bottleneck(wkt: str, passage: float) -> str:
     """A bottleneck layout with its two bars run out to the side walls of a passage this wide, centered on the opening."""
     layout = shapely.from_wkt(wkt)
+    if not isinstance(layout, shapely.Polygon):
+        raise ValueError(f"a bottleneck layout is one polygon, got a {layout.geom_type}")
     left, right = sorted((shapely.Polygon(ring) for ring in layout.interiors), key=lambda bar: bar.centroid.x)
     lo, hi = left.bounds[2], right.bounds[0]
     a, b = (lo + hi - passage) / 2, (lo + hi + passage) / 2
@@ -143,8 +145,9 @@ class Juelich(Importer):
         world = world_name(name, layout_index(metadata, run))
         played = tracks(read_run(run_text(src, run), SETS[name].fps))
         layout = dict(runs(metadata))[run]
-        if SETS[name].passage is not None:
-            layout = bottleneck(layout, SETS[name].passage)
+        passage = SETS[name].passage
+        if passage is not None:
+            layout = bottleneck(layout, passage)
         save_generated(WorldView(out / world), floor(layout), scenario_files(run, played))
         ScenarioView(out / world / "scenarios" / run).load()
         return f"{world}/scenarios/{run}"

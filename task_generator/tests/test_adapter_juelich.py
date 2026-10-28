@@ -127,6 +127,13 @@ def test_bottleneck_bars_reach_the_side_walls_of_an_18_m_passage_around_the_open
     assert walls.covers(floor.boundary)
 
 
+def test_bottleneck_takes_one_polygon_only() -> None:
+    from task_generator.adapters.juelich import PASSAGE_M, bottleneck
+
+    with pytest.raises(ValueError, match="a bottleneck layout is one polygon, got a MultiPolygon"):
+        bottleneck("MULTIPOLYGON (((0 0, 1 0, 1 1, 0 0)), ((2 2, 3 2, 3 3, 2 2)))", PASSAGE_M)
+
+
 def test_tracks_are_in_meters_whether_the_file_is_in_centimeters_or_says_meters(importer, tmp_path: Path) -> None:
     from arena_simulation_setup.shared.track import Track
 
