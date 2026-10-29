@@ -59,7 +59,7 @@ from viewport_control_msgs.msg import ViewportView
 from viewport_control_msgs.srv import ViewportSetProjection, ViewportSetReferenceFrame, ViewportSetView
 
 from arena_runtime.sim import BaseSim, SimKwargs, SimLifecycle, SimUnavailable
-from arena_runtime.sim._articulation import ArticulatedObject, command_fields
+from arena_runtime.sim._articulation import ArticulatedObject, command_fields, surface
 from arena_runtime.sim._articulation import JointCommand as ArticulatedCommand
 from arena_runtime.sim._control import (
     effective_control_yaml,
@@ -1567,7 +1567,7 @@ def _link_geometry(link: str, sdf: Path | None, scale: Scale | None) -> str:
 
 
 def _articulated_sdf(name: str, runtime: ArticulatedObject, links: Sequence[tuple[str, Joint | None, Path | None]]) -> str:
-    """A model of one link per articulation link at the model frame, the root fixed to the world, damped rubbing joints and an ArticulatedDrive over the movable ones."""
+    """A model of one link per articulation link at the model frame, the root fixed to the world, link surfaces from their materials, damped rubbing sprung joints and an ArticulatedDrive over the movable ones."""
     root = runtime.articulation.root
     scale = runtime.obstacle.scale
     factors = (1.0, 1.0, 1.0) if scale is None else (scale.x, scale.y, scale.z)
@@ -1578,8 +1578,14 @@ def _articulated_sdf(name: str, runtime: ArticulatedObject, links: Sequence[tupl
         cx, cy, cz = inertia.center
         ixx, iyy, izz = inertia.moments
         geometry = _link_geometry(link, sdf, scale)
+        contact = ""
+        if (material := runtime.articulation.materials.get(link)) is not None:
+            _, dynamic, restitution = surface(material)
+            contact += f"<friction><ode><mu>{dynamic}</mu><mu2>{dynamic}</mu2></ode></friction><bounce><restitution_coefficient>{restitution}</restitution_coefficient></bounce>"
         if joint is not None:
-            geometry = geometry.replace("</collision>", f"<surface><contact><collide_bitmask>{_MOVING_LINK_BITMASK:#x}</collide_bitmask></contact></surface></collision>")
+            contact += f"<contact><collide_bitmask>{_MOVING_LINK_BITMASK:#x}</collide_bitmask></contact>"
+        if contact:
+            geometry = geometry.replace("</collision>", f"<surface>{contact}</surface></collision>")
         body.append(f'<link name="{link}"><inertial><pose>{cx} {cy} {cz} 0 0 0</pose><mass>{inertia.mass}</mass><inertia><ixx>{ixx}</ixx><iyy>{iyy}</iyy><izz>{izz}</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>{geometry}</link>')
         if joint is None:
             continue
@@ -1593,7 +1599,8 @@ def _articulated_sdf(name: str, runtime: ArticulatedObject, links: Sequence[tupl
         body.append(
             f'<joint name="{joint.name}" type="{kind}"><parent>{joint.parent}</parent><child>{link}</child><pose>{ox} {oy} {oz} 0 0 0</pose>'
             f'<axis><xyz expressed_in="__model__">{joint.axis.x} {joint.axis.y} {joint.axis.z}</xyz><limit><lower>{lower}</lower><upper>{upper}</upper></limit>'
-            f"<dynamics><damping>{dynamics.damping}</damping><friction>{dynamics.friction}</friction></dynamics></axis></joint>"
+            f"<dynamics><damping>{dynamics.damping}</damping><friction>{dynamics.friction}</friction>"
+            f"<spring_reference>{dynamics.spring_rest}</spring_reference><spring_stiffness>{dynamics.spring_stiffness}</spring_stiffness></dynamics></axis></joint>"
         )
         wraps = "true" if joint.type is JointType.CONTINUOUS else "false"
         drives.append(f'<joint name="{joint.name}" stiffness="{dynamics.stiffness}" damping="{dynamics.drive_damping}" effort="{dynamics.effort}" wraps="{wraps}" initial="{runtime.current[joint.name]}"/>')

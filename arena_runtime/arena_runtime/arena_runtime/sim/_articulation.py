@@ -11,7 +11,7 @@ import attrs
 import geometry_msgs.msg
 import numpy as np
 from arena_simulation_setup.tree.assets.Object import ObjectIdentifier, ObjectView
-from arena_simulation_setup.utils.articulation import Articulation, Joint, JointType, Values
+from arena_simulation_setup.utils.articulation import Articulation, Joint, JointType, Material, Values
 from task_generator.shared import Obstacle, Pose, Position
 
 if typing.TYPE_CHECKING:
@@ -32,6 +32,7 @@ EFFORT_PER_FRICTION = 3.0
 LEAD = 0.25
 LAG_BLOCKED = 0.9
 MOTION_TOLERANCE = 1e-3
+SURFACE_FRICTION = 0.5
 JOINT_CODES = {JointType.REVOLUTE: 0, JointType.PRISMATIC: 1, JointType.CONTINUOUS: 2, JointType.FIXED: 3}
 
 Disc = tuple[str, tuple[float, float], float]
@@ -52,6 +53,28 @@ class DriveTuning:
 
 ANGULAR = DriveTuning(damping=0.5, friction=0.2, effort=10.0, saturation=0.1, settle=0.05)
 LINEAR = DriveTuning(damping=5.0, friction=2.0, effort=40.0, saturation=0.02, settle=0.01)
+ANGULAR_ROLES = {
+    "door": (0.5, 2.0),
+    "window": (0.5, 2.0),
+    "lid": (0.3, 1.0),
+    "cover": (0.3, 1.0),
+    "hatch": (0.3, 1.0),
+    "flap": (0.3, 1.0),
+    "hinge": (0.3, 1.0),
+    "knob": (0.02, 0.01),
+    "switch": (0.02, 0.01),
+    "handle": (0.05, 0.02),
+    "latch": (0.05, 0.02),
+    "lock": (0.05, 0.02),
+}
+"""Dry friction (N m) and damping (N m s/rad) of a hinge by role, where its asset authors none."""
+LINEAR_ROLES = {
+    "drawer": (6.0, 15.0),
+    "door": (10.0, 20.0),
+    "window": (10.0, 20.0),
+    "button": (0.5, 0.5),
+}
+"""Dry friction (N) and damping (N s/m) of a slide by role, where its asset authors none."""
 
 
 @attrs.frozen
@@ -65,7 +88,7 @@ class LinkInertia:
 
 @attrs.frozen
 class JointDynamics:
-    """Passive damping, friction and armature of a joint, its drive's effort limit, stiffness and damping, and the gap within which a drive snaps onto its target."""
+    """Passive damping, friction, armature and spring of a joint, its drive's effort limit, stiffness and damping, and the gap within which a drive snaps onto its target."""
 
     damping: float
     friction: float
@@ -74,6 +97,8 @@ class JointDynamics:
     stiffness: float
     drive_damping: float
     settle: float
+    spring_stiffness: float = 0.0
+    spring_rest: float = 0.0
 
 
 @attrs.frozen
@@ -280,7 +305,7 @@ def _samples(joint: Joint) -> list[float]:
 
 
 def joint_dynamics(articulation: Articulation, inertias: Mapping[str, LinkInertia], scale: Scale | None) -> dict[str, JointDynamics]:
-    """Per movable joint: friction holding the joint against its worst static gravity load over its range, an effort beating that friction, a drive saturating at the tuning's gap and critically damped on the moved inertia."""
+    """Per movable joint: the friction, damping, armature and spring its asset authors, else its role's or kind's friction raised to hold the worst static gravity load over its range, an effort beating friction, spring and damping at speed, a drive saturating at the tuning's gap and critically damped on the moved inertia."""
     factors = _scales(scale)
     weight = np.array([0.0, 0.0, -GRAVITY])
     result: dict[str, JointDynamics] = {}
@@ -310,17 +335,33 @@ def joint_dynamics(articulation: Articulation, inertias: Mapping[str, LinkInerti
                 inertia += body.mass * float(np.dot(lever, lever) - np.dot(lever, axis) ** 2) + float(np.dot(along**2, body.moments))
             load = max(load, abs(torque))
             moved = max(moved, inertia)
-        friction = max(tuning.friction, HOLD_MARGIN * load)
-        effort = max(tuning.effort, EFFORT_PER_FRICTION * friction)
+        roles = LINEAR_ROLES if joint.type is JointType.PRISMATIC else ANGULAR_ROLES
+        friction, damping = roles.get(joint.role or "", (tuning.friction, tuning.damping))
+        friction = max(friction, HOLD_MARGIN * load)
+        armature = tuning.armature
+        spring_stiffness = spring_rest = 0.0
+        if (authored := joint.dynamics) is not None:
+            if authored.friction is not None:
+                friction = authored.friction
+            elif authored.friction_coefficient is not None:
+                friction = authored.friction_coefficient * mass * GRAVITY
+            damping = damping if authored.damping is None else authored.damping
+            armature = armature if authored.armature is None else authored.armature
+            if authored.spring is not None:
+                spring_stiffness, spring_rest = authored.spring.stiffness, authored.spring.rest
+        stretch = max(abs(bound - spring_rest) for bound in joint.bounds)
+        effort = max(tuning.effort, EFFORT_PER_FRICTION * (friction + spring_stiffness * stretch + damping * joint.speed))
         stiffness = effort / tuning.saturation
         result[joint.name] = JointDynamics(
-            damping=tuning.damping,
+            damping=damping,
             friction=friction,
-            armature=tuning.armature,
+            armature=armature,
             effort=effort,
             stiffness=stiffness,
-            drive_damping=2.0 * math.sqrt(stiffness * (moved + tuning.armature)),
+            drive_damping=2.0 * math.sqrt(stiffness * (moved + armature)),
             settle=tuning.settle,
+            spring_stiffness=spring_stiffness,
+            spring_rest=spring_rest,
         )
     return result
 
@@ -465,13 +506,16 @@ async def delete_objects(mech: MechanismITF, obstacles: Sequence[Obstacle]) -> l
 
 
 def link_message[M](message: M, runtime: ArticulatedObject, link: str, joint: Joint | None, dynamics: Callable[..., typing.Any]) -> M:
-    """Fill a simulator's ArticulatedLink message with a link's name, inertia and the scaled joint to its parent, dynamics building its JointDynamics."""
+    """Fill a simulator's ArticulatedLink message with a link's name, inertia, surface material and the scaled joint to its parent, dynamics building its JointDynamics."""
     inertia = runtime.inertias[link]
     fields = typing.cast(typing.Any, message)
     fields.name = link
     fields.mass = inertia.mass
     fields.center = geometry_msgs.msg.Point(x=inertia.center[0], y=inertia.center[1], z=inertia.center[2])
     fields.moments = geometry_msgs.msg.Vector3(x=inertia.moments[0], y=inertia.moments[1], z=inertia.moments[2])
+    if (material := runtime.articulation.materials.get(link)) is not None:
+        fields.has_material = True
+        fields.static_friction, fields.dynamic_friction, fields.restitution = surface(material)
     if joint is None:
         return message
     origin = np.array(list(joint.origin)) * _scales(runtime.obstacle.scale)
@@ -490,8 +534,21 @@ def link_message[M](message: M, runtime: ArticulatedObject, link: str, joint: Jo
             effort=values.effort,
             stiffness=values.stiffness,
             drive_damping=values.drive_damping,
+            spring_stiffness=values.spring_stiffness,
+            spring_rest=values.spring_rest,
         )
     return message
+
+
+def surface(material: Material) -> tuple[float, float, float]:
+    """Static and dynamic friction coefficients and restitution of a link material, an unset friction taking the other's value, else SURFACE_FRICTION, an unset restitution 0."""
+    static = material.static_friction if material.static_friction is not None else material.dynamic_friction
+    dynamic = material.dynamic_friction if material.dynamic_friction is not None else static
+    return (
+        SURFACE_FRICTION if static is None else static,
+        SURFACE_FRICTION if dynamic is None else dynamic,
+        0.0 if material.restitution is None else material.restitution,
+    )
 
 
 def command_fields(command: JointCommand) -> dict[str, list]:

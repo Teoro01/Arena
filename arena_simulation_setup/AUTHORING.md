@@ -327,9 +327,14 @@ when unset). In a physics simulator a written target switches on a drive
 of bounded effort, which follows a reference ramped at that velocity and
 lets go once the joint is within 0.05 rad or 1 cm, setting it onto the
 target. A joint no drive holds moves only when pushed, and its target
-follows it. Link masses come from the link boxes (150 kg/m3, 0.2 to 20 kg),
-and a joint's friction holds it against its own weight, so a lid or flap
-stays where it is left. An unknown state or detent name, a fraction outside [0, 1] or a
+follows it. Link masses come from the link boxes (150 kg/m3, 0.2 to 20 kg).
+A joint's friction, damping, armature and spring are the ones its asset
+authors (see [Object articulation](../arena_assets/README.md#object-articulation)),
+else its role's (a drawer rubs harder than a bare slide), else its kind's,
+and a default friction holds the joint against its own weight, so a lid or
+flap stays where it is left. A sprung joint swings back to its rest when no
+drive holds it, and a link's material sets the friction and bounce of its
+surfaces. An unknown state or detent name, a fraction outside [0, 1] or a
 non-number joint value is refused as a malformed value, and an episode reset returns every joint to its initial
 value. Loading a scenario under the `scenario` obstacles mode, and the MCP
 `worlds_scenario_validate`, check every `joints:`, every field and family a

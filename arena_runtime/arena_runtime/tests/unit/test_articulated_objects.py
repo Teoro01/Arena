@@ -6,6 +6,7 @@ import typing
 import uuid
 from pathlib import Path
 
+import attrs
 import pytest
 import yaml
 
@@ -712,9 +713,55 @@ def test_gravity_raises_the_friction_that_holds_a_lid_and_the_effort_that_lifts_
     }
     dynamics = joint_dynamics(articulation, inertias, None)
     assert dynamics["lid"].friction == pytest.approx(HOLD_MARGIN * 2.0 * GRAVITY * 0.2)
-    assert dynamics["lid"].effort == pytest.approx(EFFORT_PER_FRICTION * dynamics["lid"].friction)
+    assert dynamics["lid"].effort == pytest.approx(EFFORT_PER_FRICTION * (dynamics["lid"].friction + ANGULAR.damping * articulation.joint_map["lid"].speed))
     assert dynamics["flap"].friction == ANGULAR.friction
     assert dynamics["flap"].drive_damping == pytest.approx(2.0 * math.sqrt(dynamics["flap"].stiffness * (1.0 * 0.09 + 0.01 + ANGULAR.armature)))
+
+
+def test_authored_dynamics_win_over_role_defaults_which_win_over_kind_defaults():
+    from arena_simulation_setup.utils.articulation import structure_articulation
+
+    from arena_runtime.sim._articulation import EFFORT_PER_FRICTION, GRAVITY, LINEAR, LINEAR_ROLES, LinkInertia, joint_dynamics
+
+    articulation = structure_articulation(
+        {
+            "links": {"body": [], "drawer": [], "rail": [], "door": [], "flap": []},
+            "joints": [
+                {"name": "drawer", "type": "prismatic", "parent": "body", "child": "drawer", "axis": [0, -1, 0], "limit": [0.0, 0.4], "role": "drawer"},
+                {"name": "rail", "type": "prismatic", "parent": "body", "child": "rail", "axis": [1, 0, 0], "limit": [0.0, 0.2]},
+                {
+                    "name": "door",
+                    "type": "revolute",
+                    "parent": "body",
+                    "child": "door",
+                    "axis": [0, 0, 1],
+                    "limit": [0.0, 1.5],
+                    "role": "door",
+                    "dynamics": {"friction": 0.7, "damping": 3.0, "armature": 0.05, "spring": {"stiffness": 4.0, "rest": 0.0}},
+                },
+                {"name": "flap", "type": "prismatic", "parent": "body", "child": "flap", "axis": [0, 1, 0], "limit": [0.0, 0.1], "role": "drawer", "dynamics": {"friction_coefficient": 0.5, "damping": 1.0}},
+            ],
+        }
+    )
+    assert articulation is not None
+    inertias = {link: LinkInertia(2.0, (0.0, 0.0, 0.0), (0.01, 0.01, 0.01)) for link in articulation.links}
+    dynamics = joint_dynamics(articulation, inertias, None)
+    assert (dynamics["drawer"].friction, dynamics["drawer"].damping) == LINEAR_ROLES["drawer"]
+    assert (dynamics["rail"].friction, dynamics["rail"].damping, dynamics["rail"].armature) == (LINEAR.friction, LINEAR.damping, LINEAR.armature)
+    door = dynamics["door"]
+    assert (door.friction, door.damping, door.armature, door.spring_stiffness, door.spring_rest) == (0.7, 3.0, 0.05, 4.0, 0.0)
+    assert door.effort == pytest.approx(EFFORT_PER_FRICTION * (0.7 + 4.0 * 1.5 + 3.0 * articulation.joint_map["door"].speed))
+    assert (dynamics["flap"].friction, dynamics["flap"].damping) == (pytest.approx(0.5 * 2.0 * GRAVITY), 1.0)
+
+
+def test_a_link_material_fills_an_unset_friction_from_the_other_and_restitution_with_zero():
+    from arena_simulation_setup.utils.articulation import Material
+
+    from arena_runtime.sim._articulation import SURFACE_FRICTION, surface
+
+    assert surface(Material(static_friction=0.6, dynamic_friction=0.4, restitution=0.2)) == (0.6, 0.4, 0.2)
+    assert surface(Material(dynamic_friction=0.3)) == (0.3, 0.3, 0.0)
+    assert surface(Material(restitution=0.5)) == (SURFACE_FRICTION, SURFACE_FRICTION, 0.5)
 
 
 def test_a_physical_drive_ramps_to_the_target_releases_and_snaps_onto_it(assets, on_physics_sim):
@@ -884,6 +931,40 @@ def test_the_gazebo_model_pins_the_root_and_drives_the_movable_joints(assets, tm
     assert set(drives) == {"door", "drawer", "knob"}
     assert (float(drives["door"].get("initial")), drives["knob"].get("wraps")) == (0.5, "true")
     assert float(drives["door"].get("stiffness")) == pytest.approx(runtime.dynamics["door"].stiffness)
+
+
+def test_springs_and_link_materials_reach_the_gazebo_model_and_every_simulators_link_message(assets, tmp_path):
+    import xml.etree.ElementTree as ET
+
+    from arena_mujoco_msgs.msg import ArticulatedLink as MujocoLink
+    from arena_mujoco_msgs.msg import JointDynamics as MujocoDynamics
+    from arena_simulation_setup.utils.articulation import Material
+    from isaacsim_msgs.msg import ArticulatedLink as IsaacLink
+    from isaacsim_msgs.msg import JointDynamics as IsaacDynamics
+
+    from arena_runtime.sim._articulation import link_message, resolve_articulated
+    from arena_runtime.sim.gazebo_simulator.gazebo_simulator import _articulated_sdf
+
+    (tmp_path / "door.sdf").write_text('<sdf version="1.7"><model name="door"><static>true</static><link name="link"><collision name="collision"><geometry><mesh><uri>door.dae</uri></mesh></geometry></collision></link></model></sdf>')
+    runtime = asyncio.run(resolve_articulated(_obstacle("cabinet", assets["cabinet"]), "env_0/cabinet"))
+    assert runtime is not None
+    runtime.make_physical()
+    runtime.articulation.materials = {"door": Material(static_friction=0.9, dynamic_friction=0.6, restitution=0.2)}
+    runtime.dynamics["door"] = attrs.evolve(runtime.dynamics["door"], spring_stiffness=3.0, spring_rest=0.2)
+    links = [(link, joint, tmp_path / "door.sdf" if link == "door" else None) for link, joint in runtime.tree()]
+    model = ET.fromstring(_articulated_sdf("env_0/cabinet", runtime, links)).find("model")
+    assert model is not None
+    door = next(joint for joint in model.findall("joint") if joint.get("name") == "door")
+    assert (float(door.findtext("axis/dynamics/spring_stiffness")), float(door.findtext("axis/dynamics/spring_reference"))) == (3.0, 0.2)
+    surface = next(link for link in model.findall("link") if link.get("name") == "door").find("collision/surface")
+    assert surface is not None
+    assert (float(surface.findtext("friction/ode/mu")), float(surface.findtext("bounce/restitution_coefficient")), surface.findtext("contact/collide_bitmask")) == (0.6, 0.2, "0xfffe")
+    joint = runtime.articulation.joint_map["door"]
+    for link_type, dynamics_type in ((MujocoLink, MujocoDynamics), (IsaacLink, IsaacDynamics)):
+        message = link_message(link_type(), runtime, "door", joint, dynamics_type)
+        assert (message.has_material, message.static_friction, message.dynamic_friction, message.restitution) == (True, 0.9, 0.6, 0.2)
+        assert (message.dynamics.spring_stiffness, message.dynamics.spring_rest) == (3.0, 0.2)
+        assert not link_message(link_type(), runtime, "body", None, dynamics_type).has_material
 
 
 def test_the_joint_codes_match_every_simulators_link_message():

@@ -91,7 +91,7 @@ def object_root(tmp_path):
     DynamicPaths.ARENA.path = previous
 
 
-def test_articulation_lists_links_joints_states_detents_families_and_swept_box(object_root):
+def test_articulation_lists_links_joints_physics_materials_states_detents_families_and_swept_box(object_root):
     name = f"Kitchen/McpCabinet{uuid.uuid4().hex[:8]}"
     bundle = object_root / "Kitchen" / "Object" / name.split("/")[1]
     (bundle / "links" / "body").mkdir(parents=True)
@@ -99,9 +99,10 @@ def test_articulation_lists_links_joints_states_detents_families_and_swept_box(o
     articulation = {
         "links": {"body": ["body"], "door": ["door"], "knob": []},
         "joints": [
-            {"name": "door", "type": "revolute", "parent": "body", "child": "door", "origin": [0.5, -0.3, 0.0], "axis": [0, 0, 1], "limit": [0.0, 1.57]},
+            {"name": "door", "type": "revolute", "parent": "body", "child": "door", "origin": [0.5, -0.3, 0.0], "axis": [0, 0, 1], "limit": [0.0, 1.57], "role": "door", "dynamics": {"friction": 0.4, "spring": {"stiffness": 2.0, "rest": 0.0}}},
             {"name": "knob", "type": "continuous", "parent": "door", "child": "knob", "velocity": 2.0},
         ],
+        "materials": {"door": {"static_friction": 0.6}},
         "states": {"closed": {"door": 0.0}, "open": {"door": 1.5}},
         "detents": {"knob": {"up": 0.0, "down": 3.0}},
         "swept": [[-0.5, 0.5], [-1.3, 0.3], [0.0, 1.0]],
@@ -112,7 +113,9 @@ def test_articulation_lists_links_joints_states_detents_families_and_swept_box(o
     assert shown["links"] == [{"name": "body", "nodes": ["body"], "bundle": True}, {"name": "door", "nodes": ["door"], "bundle": True}, {"name": "knob", "nodes": [], "bundle": False}]
     door, knob = shown["joints"]
     assert (door["name"], door["type"], door["parent"], door["child"], door["limit"], door["speed"]) == ("door", "revolute", "body", "door", [0.0, 1.57], 1.0)
-    assert (knob["type"], "limit" in knob, knob["speed"]) == ("continuous", False, 2.0)
+    assert (door["role"], door["dynamics"]) == ("door", {"friction": 0.4, "spring": {"stiffness": 2.0, "rest": 0.0}})
+    assert (knob["type"], "limit" in knob, knob["speed"], "dynamics" in knob) == ("continuous", False, 2.0, False)
+    assert shown["materials"] == {"door": {"static_friction": 0.6}}
     assert shown["states"] == {"closed": {"door": 0.0}, "open": {"door": 1.5}}
     assert shown["detents"] == {"knob": {"up": 0.0, "down": 3.0}}
     assert shown["families"] == {"openness": ["door"], "angle": ["knob"], "setting": ["knob"], "q": ["door", "knob"]}

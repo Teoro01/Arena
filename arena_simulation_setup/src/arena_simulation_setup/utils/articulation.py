@@ -28,6 +28,7 @@ DEFAULT_LINEAR_VELOCITY = 0.25
 FAMILIES = ("openness", "pos", "angle", "setting", "q")
 WRITABLE_FAMILIES = ("openness", "pos", "setting", "q")
 RESERVED_STATES = frozenset({"state", "target", "moving", "blocked", *FAMILIES})
+ROLES = ("door", "drawer", "lid", "cover", "hatch", "flap", "window", "hinge", "handle", "knob", "button", "switch", "latch", "lock")
 
 
 class JointType(enum.StrEnum):
@@ -60,6 +61,89 @@ def _number(field: str, value: object, accepted: str) -> float:
     if not math.isfinite(number):
         raise ValueError(f"{field} takes {accepted}, got {value!r}")
     return number
+
+
+def _nonnegative(field: str, value: object) -> float | None:
+    if value is None:
+        return None
+    number = _number(field, value, "a number >= 0")
+    if number < 0.0:
+        raise ValueError(f"{field} takes a number >= 0, got {value!r}")
+    return number
+
+
+def _role(value: object) -> str | None:
+    if value is None:
+        return None
+    if value not in ROLES:
+        raise ValueError(f"joint role must be one of {', '.join(ROLES)}, got {value!r}")
+    return typing.cast(str, value)
+
+
+def _strict(kind: str, cls: type, value: object) -> dict[str, typing.Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{kind} must be a mapping, got {value!r}")
+    fields = {field.name for field in attrs.fields(cls)}
+    if unknown := sorted(set(value) - fields):
+        raise ValueError(f"{kind} has unknown keys {unknown}, known: {sorted(fields)}")
+    return dict(value)
+
+
+def _rounded(instance: object) -> dict[str, object]:
+    return {key: round(value, 6) + 0.0 if isinstance(value, float) else value for key, value in attrs.asdict(instance, recurse=False).items() if value is not None}
+
+
+@attrs.define(kw_only=True)
+class Spring:
+    """A passive spring pulling a joint toward its rest value, stiffness in N/m or N m/rad."""
+
+    stiffness: float = attrs.field(converter=lambda value: typing.cast(float, _nonnegative("spring stiffness", value)))
+    rest: float = attrs.field(default=0.0, converter=lambda value: _number("spring rest", value, "a joint value"))
+
+    @classmethod
+    def parse(cls, value: Spring | Mapping[str, typing.Any]) -> Spring:
+        return value if isinstance(value, Spring) else cls(**_strict("spring", cls, value))
+
+
+@attrs.define(kw_only=True)
+class Dynamics:
+    """Passive physics of a joint as its asset authors it, each part optional: dry friction in N or N m, or a PhysX friction coefficient scaling the joint's load, viscous damping in N s/m or N m s/rad, armature in kg or kg m^2, and a spring."""
+
+    friction: float | None = attrs.field(default=None, converter=lambda value: _nonnegative("friction", value))
+    friction_coefficient: float | None = attrs.field(default=None, converter=lambda value: _nonnegative("friction_coefficient", value))
+    damping: float | None = attrs.field(default=None, converter=lambda value: _nonnegative("damping", value))
+    armature: float | None = attrs.field(default=None, converter=lambda value: _nonnegative("armature", value))
+    spring: Spring | None = attrs.field(default=None, converter=attrs.converters.optional(Spring.parse))
+
+    def __attrs_post_init__(self) -> None:
+        if self.friction is not None and self.friction_coefficient is not None:
+            raise ValueError("dynamics take friction or friction_coefficient, not both")
+
+    @classmethod
+    def parse(cls, value: Dynamics | Mapping[str, typing.Any]) -> Dynamics:
+        return value if isinstance(value, Dynamics) else cls(**_strict("dynamics", cls, value))
+
+    def unstructure(self) -> dict[str, object]:
+        result = _rounded(self)
+        if self.spring is not None:
+            result["spring"] = _rounded(self.spring)
+        return result
+
+
+@attrs.define(kw_only=True)
+class Material:
+    """Contact properties of a link's surfaces as its asset authors them: Coulomb friction coefficients and restitution."""
+
+    static_friction: float | None = attrs.field(default=None, converter=lambda value: _nonnegative("static_friction", value))
+    dynamic_friction: float | None = attrs.field(default=None, converter=lambda value: _nonnegative("dynamic_friction", value))
+    restitution: float | None = attrs.field(default=None, converter=lambda value: None if value is None else _fraction("restitution", value))
+
+    @classmethod
+    def parse(cls, value: Material | Mapping[str, typing.Any]) -> Material:
+        return value if isinstance(value, Material) else cls(**_strict("material", cls, value))
+
+    def unstructure(self) -> dict[str, object]:
+        return _rounded(self)
 
 
 def _fraction(field: str, value: object) -> float:
@@ -157,6 +241,8 @@ class Joint:
     axis: Position = attrs.field(factory=lambda: Position(0.0, 0.0, 1.0), converter=_axis)
     limit: Side | None = attrs.field(default=None, converter=_limit)
     velocity: float | None = attrs.field(default=None, converter=attrs.converters.optional(float))
+    role: str | None = attrs.field(default=None, converter=_role)
+    dynamics: Dynamics | None = attrs.field(default=None, converter=attrs.converters.optional(Dynamics.parse))
 
     def __attrs_post_init__(self) -> None:
         if self.parent == self.child:
@@ -167,6 +253,8 @@ class Joint:
             raise ValueError(f"{self.type} joint {self.name} takes no limit")
         if self.velocity is not None and not self.velocity > 0.0:
             raise ValueError(f"joint {self.name} velocity must be > 0, got {self.velocity}")
+        if self.dynamics is not None and self.type is JointType.FIXED:
+            raise ValueError(f"fixed joint {self.name} takes no dynamics")
 
     @property
     def movable(self) -> bool:
@@ -231,6 +319,10 @@ class Joint:
             result["limit"] = [round(bound, 6) + 0.0 for bound in self.limit]
         if self.velocity is not None:
             result["velocity"] = self.velocity
+        if self.role is not None:
+            result["role"] = self.role
+        if self.dynamics is not None:
+            result["dynamics"] = self.dynamics.unstructure()
         return result
 
 
@@ -277,6 +369,14 @@ def _detents(value: object) -> dict[str, Values]:
     return detents
 
 
+def _materials(value: object) -> dict[str, Material]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError(f"materials must map link names to materials, got {value!r}")
+    return {_name("link", link): Material.parse(material) for link, material in value.items()}
+
+
 def _box(value: object) -> Box | None:
     if value is None:
         return None
@@ -295,6 +395,7 @@ class Articulation:
     states: dict[str, Values] = attrs.field(factory=dict, converter=_states)
     detents: dict[str, Values] = attrs.field(factory=dict, converter=_detents)
     swept: Box | None = attrs.field(default=None, converter=_box)
+    materials: dict[str, Material] = attrs.field(factory=dict, converter=_materials)
 
     def __attrs_post_init__(self) -> None:
         names = [joint.name for joint in self.joints]
@@ -318,6 +419,8 @@ class Articulation:
             raise ValueError("joints form a cycle")
         if unreached := sorted(set(self.links) - {roots[0], *children}):
             raise ValueError(f"links {', '.join(unreached)} hang on no joint")
+        if strays := sorted(set(self.materials) - set(self.links)):
+            raise ValueError(f"materials name links {', '.join(strays)}, which links does not list (links: {', '.join(self.links)})")
         nodes = [node for link_nodes in self.links.values() for node in link_nodes]
         if repeated := sorted({node for node in nodes if nodes.count(node) > 1}):
             raise ValueError(f"source nodes belong to one link each, {', '.join(repeated)} is listed twice")
@@ -522,6 +625,9 @@ class Articulation:
             origin = linear @ np.array(list(joint.origin)) + transform[:3, 3]
             axis = linear @ np.array(list(joint.axis))
             linear_joint = joint.type is JointType.PRISMATIC
+            dynamics = joint.dynamics
+            if dynamics is not None and dynamics.spring is not None and linear_joint:
+                dynamics = attrs.evolve(dynamics, spring=attrs.evolve(dynamics.spring, rest=dynamics.spring.rest * scale))
             joints.append(
                 attrs.evolve(
                     joint,
@@ -529,12 +635,13 @@ class Articulation:
                     axis=Position(*axis),
                     limit=None if joint.limit is None else tuple(bound * scale for bound in joint.limit) if linear_joint else joint.limit,
                     velocity=None if joint.velocity is None else joint.velocity * scale if linear_joint else joint.velocity,
+                    dynamics=dynamics,
                 )
             )
         prismatic = {joint.name for joint in self.joints if joint.type is JointType.PRISMATIC}
         states = {state: {joint: value * scale if joint in prismatic else value for joint, value in values.items()} for state, values in self.states.items()}
         detents = {joint: {detent: value * scale if joint in prismatic else value for detent, value in values.items()} for joint, values in self.detents.items()}
-        return Articulation(links=self.links, joints=joints, states=states, detents=detents)
+        return Articulation(links=self.links, joints=joints, states=states, detents=detents, materials=self.materials)
 
     def configurations(self, samples: int = SWEEP_SAMPLES, steps: int = SWEEP_STEPS) -> Iterable[Values]:
         """Joint values covering every joint's reachable range: the full grid of steps per joint when it fits in samples, else every joint's bounds with the others at 0 plus seeded random draws."""
@@ -574,8 +681,8 @@ class Articulation:
             return value
         if not isinstance(value, Mapping):
             raise ValueError(f"articulation must be a mapping of links, joints, states and detents, got {value!r}")
-        if unknown := sorted(set(value) - {"links", "joints", "states", "detents", "swept"}):
-            raise ValueError(f"articulation has unknown keys {unknown}, known: links, joints, states, detents, swept")
+        if unknown := sorted(set(value) - {"links", "joints", "states", "detents", "swept", "materials"}):
+            raise ValueError(f"articulation has unknown keys {unknown}, known: links, joints, states, detents, swept, materials")
         if missing := sorted({"links", "joints"} - set(value)):
             raise ValueError(f"articulation is missing {missing}")
         return cls(**value)
@@ -588,6 +695,8 @@ class Articulation:
             result["detents"] = {joint: {detent: round(value, 6) + 0.0 for detent, value in values.items()} for joint, values in self.detents.items()}
         if self.swept is not None:
             result["swept"] = [list(side) for side in self.swept]
+        if self.materials:
+            result["materials"] = {link: material.unstructure() for link, material in self.materials.items()}
         return result
 
 

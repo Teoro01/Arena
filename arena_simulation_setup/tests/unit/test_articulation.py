@@ -109,6 +109,12 @@ def test_continuous_joint_wraps_and_fixed_stays():
         (lambda value: value["joints"][0].update(axis=[0, 0, 0]), "joint axis must not be zero"),
         (lambda value: value["joints"][0].update(hinge="left"), "unknown keys \\['hinge'\\]"),
         (lambda value: value.update(extra=1), "unknown keys \\['extra'\\]"),
+        (lambda value: value["joints"][0].update(dynamics={"friction": -1.0}), "friction takes a number >= 0"),
+        (lambda value: value["joints"][0].update(dynamics={"friction": 1.0, "friction_coefficient": 0.2}), "friction or friction_coefficient, not both"),
+        (lambda value: value["joints"][0].update(dynamics={"spring": {"stiffness": 1.0, "reference": 0.0}}), "spring has unknown keys \\['reference'\\]"),
+        (lambda value: value["joints"][0].update(role="trapdoor"), "joint role must be one of"),
+        (lambda value: value.update(materials={"lid": {"static_friction": 0.5}}), "materials name links lid"),
+        (lambda value: value.update(materials={"door": {"restitution": 1.5}}), "restitution takes a number in \\[0, 1\\]"),
     ],
 )
 def test_parse_names_the_problem(change, message):
@@ -394,3 +400,41 @@ def test_family_members_lists_one_family_of_a_snapshot_without_naming_its_joints
     continuous, _ = cabinet().fields({"door": 0.75, "drawer": 0.4})
     assert family_members(continuous, "openness") == {"door": pytest.approx(0.5), "drawer": pytest.approx(1.0)}
     assert family_members(continuous, "angle") == {}
+
+
+def test_role_dynamics_and_materials_round_trip():
+    value = {
+        **CABINET,
+        "joints": [
+            {**CABINET["joints"][0], "role": "door", "dynamics": {"friction": 0.4, "damping": 1.5, "armature": 0.02, "spring": {"stiffness": 3.0, "rest": 0.1}}},
+            {**CABINET["joints"][1], "role": "drawer", "dynamics": {"friction_coefficient": 0.2}},
+        ],
+        "materials": {"door": {"static_friction": 0.6, "dynamic_friction": 0.4, "restitution": 0.1}, "drawer": {"dynamic_friction": 0.3}},
+    }
+    articulation = Articulation.parse(value)
+    door, drawer = articulation.joint_map["door"], articulation.joint_map["drawer"]
+    assert (door.role, door.dynamics.friction, door.dynamics.spring.stiffness, door.dynamics.spring.rest) == ("door", 0.4, 3.0, 0.1)
+    assert (drawer.role, drawer.dynamics.friction, drawer.dynamics.friction_coefficient) == ("drawer", None, 0.2)
+    assert articulation.materials["drawer"].static_friction is None
+    raw = articulation.unstructure()
+    assert raw["joints"][0]["dynamics"] == {"friction": 0.4, "damping": 1.5, "armature": 0.02, "spring": {"stiffness": 3.0, "rest": 0.1}}
+    assert raw["joints"][1]["dynamics"] == {"friction_coefficient": 0.2}
+    assert raw["materials"] == {"door": {"static_friction": 0.6, "dynamic_friction": 0.4, "restitution": 0.1}, "drawer": {"dynamic_friction": 0.3}}
+    assert Articulation.parse(raw).unstructure() == raw
+
+
+def test_a_fixed_joint_takes_no_dynamics():
+    with pytest.raises(ValueError, match="fixed joint glue takes no dynamics"):
+        Joint(name="glue", type="fixed", parent="a", child="b", dynamics={"damping": 1.0})
+
+
+def test_transformed_scales_a_prismatic_spring_rest_and_keeps_materials():
+    value = {
+        **CABINET,
+        "joints": [CABINET["joints"][0], {**CABINET["joints"][1], "dynamics": {"spring": {"stiffness": 20.0, "rest": 30.0}}}],
+        "materials": {"drawer": {"dynamic_friction": 0.3}},
+    }
+    moved = Articulation.parse(value).transformed(np.diag([0.01, 0.01, 0.01, 1.0]))
+    spring = moved.joint_map["drawer"].dynamics.spring
+    assert (spring.stiffness, spring.rest) == (20.0, pytest.approx(0.3))
+    assert moved.materials["drawer"].dynamic_friction == 0.3

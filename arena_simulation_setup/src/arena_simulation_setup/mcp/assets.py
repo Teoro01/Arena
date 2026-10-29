@@ -96,7 +96,7 @@ def assets_push(
 
 @domain.tool(read_only=True, open_world=True)
 def assets_articulation(name: Annotated[str, Field(description="object name as a scenario's objects reference it, [domain/]name")]) -> dict[str, object]:
-    """Links, joints (type, parent, child, limits, speed), named states, detents, field families (family to member joints) and swept box of an articulated object, or that the object is rigid."""
+    """Links, joints (type, parent, child, limits, speed, role, authored dynamics), link materials, named states, detents, field families (family to member joints) and swept box of an articulated object, or that the object is rigid."""
     from arena_simulation_setup.tree.assets.Object import ObjectIdentifier
 
     try:
@@ -116,6 +116,7 @@ def assets_articulation(name: Annotated[str, Field(description="object name as a
         "root": articulation.root,
         "links": [{"name": link, "nodes": nodes, "bundle": (view.path / "links" / link).is_dir()} for link, nodes in articulation.links.items()],
         "joints": [{**joint.unstructure(), "speed": joint.speed} for joint in articulation.joints],
+        "materials": {link: material.unstructure() for link, material in articulation.materials.items()},
         "states": articulation.states,
         "detents": articulation.detents,
         "families": {family: list(members) for family, members in articulation.families().items()},

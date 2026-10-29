@@ -174,11 +174,18 @@ A physics simulator implements `_articulated_spawn` and `_articulated_drive`.
 `make_physical` derives each link's mass, center and principal moments from
 its box (`link_inertias`: `DENSITY` 150 kg/m3 clamped to `MASS_RANGE`, a link
 without a box a 0.05 kg point at its joint) and each movable joint's
-`JointDynamics` (`joint_dynamics`): passive damping, friction raised to
-`HOLD_MARGIN` times the worst static gravity load over the joint's range,
-armature, a drive effort `EFFORT_PER_FRICTION` times the friction with the
-`ANGULAR`/`LINEAR` floors, a stiffness saturating at the tuning's gap and a
-drive damping critical on the inertia the joint moves. `_articulated_spawn`
+`JointDynamics` (`joint_dynamics`): the friction, damping, armature and
+spring the joint's `dynamics` authors, a `friction_coefficient` taken as
+that many times the weight the joint moves. What it leaves out comes from
+the joint's role (`ANGULAR_ROLES`, `LINEAR_ROLES`), else from its kind
+(`ANGULAR`, `LINEAR`), with a default friction raised to `HOLD_MARGIN` times
+the worst static gravity load over the joint's range. The drive effort is
+`EFFORT_PER_FRICTION` times the friction plus the spring's pull across the
+range plus the damping at the joint's speed, with the kind's floor, its
+stiffness saturates at the tuning's gap and its damping is critical on the
+inertia the joint moves. A link material reaches the simulators as
+`surface`: static and dynamic friction, an unset one taking the other's
+value or `SURFACE_FRICTION`, and restitution. `_articulated_spawn`
 builds the model from them, its root fixed at the obstacle pose and the
 links nested at the model frame, contacts within the object and with the
 floor off. `move_objects` and `delete_objects` hand the object itself to
@@ -196,9 +203,9 @@ command whose placement got no reading is placed again on the next tick.
 
 | Simulator | Model | Drive and reading |
 | --- | --- | --- |
-| MuJoCo | `/mujoco/SpawnArticulated`: one body tree with hinge or slide joints, explicit inertia, the link meshes and their convex pieces, contacts excluded within the object and with the world body | `/mujoco/DriveArticulated`: one position actuator per joint, gains switched in the compiled model and the spec, `qpos` read back in the same call |
-| Isaac | `/isaac/SpawnArticulated`: a fixed-base articulation of rigid bodies referencing the link USDs, their meshes colliding through convex decomposition, revolute or prismatic joints with drives, self collision off, floor colliders filtered | `/isaac/DriveArticulated`: DOF gains, friction efforts, armature and targets through the articulation view once physics has parsed it |
-| Gazebo | an SDF model with the root joined to the world, link geometry from the link SDFs, moving links masked off the floor (`collide_bitmask`) | the `ArticulatedDrive` system of arena_gz_plugins on `/model/<name>/articulated/command` and `/state` (gz transport, `gz.msgs.Double_V`) |
+| MuJoCo | `/mujoco/SpawnArticulated`: one body tree with hinge or slide joints (damping, friction loss, armature, joint stiffness at `springref`), explicit inertia, the link meshes and their convex pieces at the material's dynamic friction (MuJoCo has no restitution coefficient), contacts excluded within the object and with the world body | `/mujoco/DriveArticulated`: one position actuator per joint, gains switched in the compiled model and the spec, `qpos` read back in the same call |
+| Isaac | `/isaac/SpawnArticulated`: a fixed-base articulation of rigid bodies referencing the link USDs, their meshes colliding through convex decomposition, revolute or prismatic joints with drives that carry the spring toward its rest while off, a bound physics material per link with one, self collision off, floor colliders filtered | `/isaac/DriveArticulated`: DOF gains, friction efforts, armature and targets through the articulation view once physics has parsed it |
+| Gazebo | an SDF model with the root joined to the world, link geometry from the link SDFs with the material's dynamic friction (`mu`, `mu2`) and restitution, joints with damping, friction and `spring_stiffness` at `spring_reference`, moving links masked off the floor (`collide_bitmask`) | the `ArticulatedDrive` system of arena_gz_plugins on `/model/<name>/articulated/command` and `/state` (gz transport, `gz.msgs.Double_V`) |
 
 ### `SimLifecycle`
 
