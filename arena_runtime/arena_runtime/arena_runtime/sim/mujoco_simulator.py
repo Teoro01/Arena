@@ -450,6 +450,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
                     scale=Scale(x=scale[0], y=scale[1], z=scale[2]),
                     mesh_path=meshes[0][1] if meshes else "",
                     visuals=[PrimVisual(name=name, mesh_path=path) for name, path in meshes[1:]],
+                    is_static=True,
                 )
             )
             indices.append(i)
@@ -529,7 +530,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
                     (sx, sy, sz), pose = sloped
                     pose_msg = pose.to_msg()
                     pose_msg.position = _shifted(pose_msg.position, shift)
-                    return Prim(name=wall_name, pose=pose_msg, scale=Scale(x=sx, y=sy, z=sz), mesh_path="", material=material)
+                    return Prim(name=wall_name, pose=pose_msg, scale=Scale(x=sx, y=sy, z=sz), mesh_path="", material=material, is_static=True)
                 return Wall(
                     name=wall_name,
                     start=_shifted(segment.start.to_msg(), shift),
@@ -547,7 +548,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
             try:
                 prim_name = self._realizer.realize(f"obstacle_{next(self.wall_counter)}")
                 meshes = _mesh_files(model)
-                prim = Prim()
+                prim = Prim(is_static=True)
                 prim.mesh_path = meshes[0][1] if meshes else ""
                 prim.visuals = [PrimVisual(name=name, mesh_path=path) for name, path in meshes[1:]]
                 prim.name = self._NS_WALL(prim_name)
@@ -682,6 +683,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
             scale=Scale(x=sx, y=sy, z=sz),
             mesh_path="",
             comb=comb,
+            is_static=velocity is None,
         )
         if velocity is not None:
             prim.velocity = _vector(velocity)

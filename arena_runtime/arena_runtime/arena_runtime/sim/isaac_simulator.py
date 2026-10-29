@@ -184,6 +184,7 @@ def _box_wall(name: str, size: tuple[float, float, float], pose: Pose) -> Wall:
         start=geometry_msgs.msg.Point(x=cx - half * math.cos(yaw), y=cy - half * math.sin(yaw), z=cz - sz / 2.0),
         end=geometry_msgs.msg.Point(x=cx + half * math.cos(yaw), y=cy + half * math.sin(yaw), z=cz + sz / 2.0),
         thickness=sy,
+        is_static=True,
     )
 
 
@@ -427,7 +428,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
                 self._logger.debug(traceback.format_exc())
                 return None
             assert model.path is not None, f"USD model {model.name} must have a valid file path"
-            prim = Prim()
+            prim = Prim(is_static=True)
             prim.usd_path = str(model.path)
             prim.name = self._NS_PRIM(obstacle.name)
             prim.pose = self._placed(obstacle.pose).to_msg()
@@ -537,7 +538,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
                     wall = _box_wall(wall_name, size, placed)
                     tilted.append(Prim(name=wall_name, pose=placed.to_msg()))
                 else:
-                    wall = Wall(name=wall_name, start=start.to_msg(), end=end.to_msg(), thickness=segment.width)
+                    wall = Wall(name=wall_name, start=start.to_msg(), end=end.to_msg(), thickness=segment.width, is_static=True)
                 wall.material = material_to_msg(await segment.material.resolve())
                 wall.visible = segment.visible
                 wall.solid = segment.solid
@@ -553,7 +554,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
             try:
                 prim_name = self._realizer.realize(f"obstacle_{next(self.wall_counter)}")
                 assert model.path is not None, f"USD model {model.name} must have a valid file path"
-                prim = Prim()
+                prim = Prim(is_static=True)
                 prim.usd_path = str(model.path)
                 prim.name = self._NS_WALL(prim_name)
                 prim.pose = self._placed(obstacle.pose).to_msg()
@@ -725,6 +726,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
         pose = self._placed(pose)
         wall = _box_wall(name, size, pose)
         wall.velocity = _vector3(velocity or (0.0, 0.0, 0.0))
+        wall.is_static = velocity is None
         if material is not None:
             wall.material = material_to_msg(await material.resolve())
         req = SpawnWalls.Request()
