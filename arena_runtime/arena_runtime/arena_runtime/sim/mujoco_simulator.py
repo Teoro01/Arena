@@ -95,6 +95,37 @@ _MUJOCO_PHYSICS_DT = 0.002
 _MESH_MODEL_TYPES = (ModelType.OBJ, ModelType.SDF)
 _SPAWN_ASSETS_TIMEOUT_S = 300.0
 _RESEND_AFTER_S = 10.0
+_PRIM_BATCH_WINDOW_S = 0.02
+
+
+class _PrimBatch:
+    """Sends the prims of spawn_box calls that arrive within a short window as one SpawnPrims request."""
+
+    def __init__(self, client: ClientWrapper, env_id: int) -> None:
+        self._client = client
+        self._env_id = env_id
+        self._pending: list[tuple[Prim, asyncio.Future[bool]]] = []
+        self._flush: asyncio.Task[None] | None = None
+
+    async def submit(self, prim: Prim) -> bool:
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._pending.append((prim, future))
+        if self._flush is None:
+            self._flush = asyncio.create_task(self._send())
+        return await future
+
+    async def _send(self) -> None:
+        await asyncio.sleep(_PRIM_BATCH_WINDOW_S)
+        batch, self._pending, self._flush = self._pending, [], None
+        try:
+            res = await self._client.call_timeout(SpawnPrims.Request(env_id=self._env_id, prims=[prim for prim, _ in batch]))
+        except Exception as e:
+            for _, future in batch:
+                future.set_exception(e)
+            return
+        ret = list(res.ret) if res is not None else []
+        for i, (_, future) in enumerate(batch):
+            future.set_result(i < len(ret) and bool(ret[i]))
 
 
 class MujocoHost(SimLifecycle):
@@ -217,6 +248,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
             SpawnUrdf=self.node.create_client_wrapper(SpawnUrdf, "/mujoco/SpawnUrdf"),
             SpawnWalls=self.node.create_client_wrapper(SpawnWalls, "/mujoco/SpawnWalls"),
         )
+        self._prim_batch = _PrimBatch(self._clients.SpawnPrims, self._env_id)
         self._peds_publisher = self.node.create_publisher(Pedestrians, "/mujoco/arena_peds", 10)
 
         self._robot_prims: dict[str, str] = {}
@@ -689,9 +721,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
             prim.velocity = _vector(velocity)
         if material is not None:
             prim.material = material_to_msg(await material.resolve())
-        req = SpawnPrims.Request(env_id=self._env_id, prims=[prim])
-        res = await self._clients.SpawnPrims.call_timeout(req)
-        return bool(res) and bool(res.ret) and res.ret[0]
+        return await self._prim_batch.submit(prim)
 
     async def move_box(self, name: str, pose: Pose) -> bool:
         req = EditPrims.Request(env_id=self._env_id, prims=[Prim(name=name, pose=self._placed(pose).to_msg())], pose=True)
