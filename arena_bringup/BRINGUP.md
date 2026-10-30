@@ -433,7 +433,7 @@ shapes of argument:
 
 | Shape | Example | Lands as | Purpose |
 |---|---|---|---|
-| `robot.<cap>:=<kind>` | `robot.mobile:=rosnav_rl`, `robot.mobile:=drl` | `robot.<cap>_adapter` | Pick which `Bringup` runs for the cap. |
+| `robot.<cap>:=<kind>` | `robot.mobile:=rosnav_rl`, `robot.mobile:=drl`, `robot.mobile:=meshnav` | `robot.<cap>_adapter` | Pick which `Bringup` runs for the cap. |
 | `robot.<cap>.<key>:=<val>` | `robot.mobile.local_planner:=teb`, `robot.mobile.planner:=drlvo` | `robot.<cap>.<key>` | Override a value from `caps/<cap>.yaml`. |
 | `<adapter-kwarg>:=<val>` | `global_planner:=smac`, `global_planner:=nav2/navfn` | `robot.<cap>.<key>` (via the adapter's launch file) | Adapter-internal launch kwargs (nav2 planner names, or the `<family>/<kind>` form consumed by the `drl` adapter). |
 

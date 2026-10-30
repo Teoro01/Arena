@@ -349,6 +349,7 @@ def test_ride_phase_survives_the_recorded_form():
 class _FakeAdapter:
     signals: frozenset = frozenset()
     signal = None
+    routes_levels = False
 
     def __init__(self):
         self.dispatched: list = []
@@ -367,6 +368,10 @@ class _FakeAdapter:
         return SimpleNamespace(status=0, reason=None, is_done=lambda: True)
 
 
+class _MeshAdapter(_FakeAdapter):
+    routes_levels = True
+
+
 class _Logger:
     def get_child(self, _name):
         return self
@@ -375,7 +380,7 @@ class _Logger:
         return lambda *a, **kw: None
 
 
-def _robot_manager(wm: WorldManager, env_offset: tuple[float, float] = (100.0, 0.0), climbs: tuple[str, ...] = ()):
+def _robot_manager(wm: WorldManager, env_offset: tuple[float, float] = (100.0, 0.0), climbs: tuple[str, ...] = (), adapter_cls: type[_FakeAdapter] = _FakeAdapter):
     from task_generator.manager.robot_manager.robot_manager import RobotManager
     from task_generator.tasks.robots.request import TaskKind
 
@@ -408,7 +413,7 @@ def _robot_manager(wm: WorldManager, env_offset: tuple[float, float] = (100.0, 0
         realize=lambda pose: Pose(Position(pose.position.x + env_offset[0], pose.position.y + env_offset[1]), pose.orientation),
         ezilear=lambda pose: Pose(Position(pose.position.x - env_offset[0], pose.position.y - env_offset[1]), pose.orientation),
     )
-    adapter = _FakeAdapter()
+    adapter = adapter_cls()
     rm._adapters = {TaskKind.GOTO_POSE: adapter}
     rm._adapter_instances = [adapter]
     rm._adapter = None
@@ -418,6 +423,7 @@ def _robot_manager(wm: WorldManager, env_offset: tuple[float, float] = (100.0, 0
     rm._placed = True
     rm._unsupported_kinds_logged = set()
     rm._abort_episode = None
+    rm._phase_failure = None
     rm._cabin_to_clear = ""
     rm._publish_goal_task = None
     rm._watchers = []
@@ -807,3 +813,80 @@ def test_submit_task_takes_the_stairs_for_a_climbing_robot():
     plain, _, _ = _robot_manager(wm, env_offset=(0.0, 0.0))
     asyncio.run(plain.submit_task(TaskRequest(phases=[GoToPhase(pose=_pose(32.0, 8.0))]), _pose(2.0, 2.0)))
     assert len(plain._runner.phases) == 1
+
+
+# planners that cross stairs themselves
+
+
+def test_walked_stairs_route_without_phases():
+    goal = GoToPhase(pose=_pose(32.0, 8.0))
+    assert route_phases([goal], Position(2.0, 2.0), _stairs_demo(), walks=("stairs",), **_GO1) == [goal]
+    assert route_phases([GoToPhase(pose=_pose(32.0, 8.0), via=("stairs_low",))], Position(2.0, 2.0), _stairs_demo(), walks=("stairs",), **_GO1) == [goal]
+
+
+def test_walking_stairs_still_rides_elevators_where_no_walked_stair_leads():
+    wm = _stairs_demo({"0": [_elev("e0", 2.0, 8.0, "e1")], "1": [_elev("e1", 2.0, 8.0, "e0")]})
+    goal = GoToPhase(pose=_pose(32.0, 8.0))
+    assert route_phases([goal], Position(2.0, 2.0), wm, walks=("stairs",), **_GO1) == [goal]
+    phases = route_phases([goal], Position(2.0, 2.0), wm, walks=("escalator",), **_GO1)
+    assert phases == [goal]
+    down = route_phases([GoToPhase(pose=_pose(2.0, 2.0))], Position(30.0, 2.0), wm, walks=("escalator",), **_GO1)
+    assert [type(p) for p in down] == [GoToPhase]
+    lift = route_phases([goal], Position(2.0, 2.0), wm, walks=(), **_GO1)
+    assert [type(p) for p in lift] == [ElevatorLegPhase, ElevatorRidePhase, ElevatorLegPhase, GoToPhase]
+
+
+def test_walked_stair_then_elevator_keeps_only_the_ride():
+    wm = _stair_wm(
+        {
+            "0": [_stair("s01_low", 10.3, 2.0, "-x", "s01_high")],
+            "1": [_stair("s01_high", 3.7, 2.0, "+x", "s01_low", top=True)],
+            "2": [],
+        },
+        {"1": [_elev("e1", 2.0, 8.0, "e2")], "2": [_elev("e2", 2.0, 8.0, "e1")]},
+    )
+    phases = route_phases([GoToPhase(pose=_pose(45.0, 5.0))], Position(2.0, 2.0), wm, walks=("stairs",), **_GO1)
+    assert [type(p) for p in phases] == [ElevatorLegPhase, ElevatorRidePhase, ElevatorLegPhase, GoToPhase]
+    assert phases[1].target == "e1"
+
+
+def test_submit_task_rides_elevators_but_leaves_stairs_to_a_level_routing_planner():
+    wm = _stairs_demo({"0": [_elev("e0", 2.0, 8.0, "e1")], "1": [_elev("e1", 2.0, 8.0, "e0")]})
+    climber, _, _ = _robot_manager(wm, env_offset=(0.0, 0.0), climbs=("stairs",), adapter_cls=_MeshAdapter)
+    asyncio.run(climber.submit_task(TaskRequest(phases=[GoToPhase(pose=_pose(32.0, 8.0))]), _pose(2.0, 2.0)))
+    assert [type(state.phase) for state in climber._runner.phases] == [GoToPhase]
+
+    wheeled, adapter, _ = _robot_manager(wm, env_offset=(0.0, 0.0), adapter_cls=_MeshAdapter)
+    asyncio.run(wheeled.submit_task(TaskRequest(phases=[GoToPhase(pose=_pose(32.0, 8.0))]), _pose(2.0, 2.0)))
+    assert [type(state.phase) for state in wheeled._runner.phases] == [ElevatorLegPhase, ElevatorRidePhase, ElevatorLegPhase, GoToPhase]
+    assert not any(isinstance(state.phase, (StairsLegPhase, StairsRidePhase)) for state in wheeled._runner.phases)
+    assert adapter.dispatched[0].pose.position.x == pytest.approx(wheeled._runner.phases[0].phase.pose.position.x)
+
+
+def test_an_adapter_fails_its_active_phase_on_the_next_tick():
+    wm = _two_storey()
+    rm, _, _ = _robot_manager(wm, env_offset=(0.0, 0.0))
+    asyncio.run(rm.submit_task(TaskRequest(phases=[GoToPhase(pose=_pose(10.0, 10.0), on_failure="stop_task"), GoToPhase(pose=_pose(12.0, 12.0))]), _pose(2.0, 2.0)))
+    rm.fail_phase("no mesh path")
+    _tick(rm, 1.0, 2.0, 2.0)
+    first = rm._runner.phases[0]
+    assert (first.outcome, first.reason) == ("failed", "no mesh path")
+    assert rm._runner.active is None
+
+
+def test_a_phase_failure_applies_only_to_the_phase_it_was_raised_on():
+    wm = _two_storey()
+    rm, adapter, _ = _robot_manager(wm, env_offset=(0.0, 0.0))
+    asyncio.run(rm.submit_task(TaskRequest(phases=[GoToPhase(pose=_pose(10.0, 10.0)), GoToPhase(pose=_pose(12.0, 12.0))]), _pose(2.0, 2.0)))
+    rm.fail_phase("no mesh path")
+    _tick(rm, 1.0, 2.0, 2.0)
+    assert rm._runner.phases[0].outcome == "failed"
+    assert rm._runner.active == 1 and adapter.dispatched[-1].pose.position.x == pytest.approx(12.0)
+    _tick(rm, 2.0, 2.0, 2.0)
+    assert rm._runner.phases[1].outcome == "pending"
+    rm.fail_phase("stale")
+    rm.begin_episode()
+    rm._placed = True
+    asyncio.run(rm.submit_task(TaskRequest(phases=[GoToPhase(pose=_pose(10.0, 10.0))]), _pose(2.0, 2.0)))
+    _tick(rm, 3.0, 2.0, 2.0)
+    assert rm._runner.phases[0].outcome == "pending"

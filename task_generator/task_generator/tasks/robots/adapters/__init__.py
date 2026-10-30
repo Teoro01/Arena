@@ -132,6 +132,7 @@ class Adapter(ABC):
 
     kind: ClassVar[str]
     _adapter_meta: ClassVar[AdapterMeta]
+    routes_levels: ClassVar[bool] = False
     cap_displays: ClassVar[tuple[AdapterDisplayHint, ...]] = (
         AdapterDisplayHint(
             name="Robot Model",

@@ -67,6 +67,20 @@ def blocked_doors(
     return frozenset(blocked)
 
 
+def static_shut_doors(doors: Iterable[Door], agents: Sequence[str]) -> frozenset[str]:
+    """Names of doors that stay shut for every agent in `agents` whatever happens at runtime: no activation, or a locked gate they are not authorized for, with neither a pressure plate driving it nor an unlock trigger."""
+    listed = list(doors)
+    driven = {str(cfg.params['drives']) for door in listed for cfg in door.semantics if 'drives' in cfg.params}
+    shut: set[str] = set()
+    for door in listed:
+        if door.name in driven or any('unlock_on' in cfg.params for cfg in door.semantics):
+            continue
+        is_gate, authorized, locked = gate_config(door)
+        if max(door.activation_distance) <= 0.0 or (is_gate and locked and not authorized_match(agents, authorized)):
+            shut.add(door.name)
+    return frozenset(shut)
+
+
 def mask_doors(doors: Iterable[Door], world_doors: Iterable[tuple[str, Door]], blocked: frozenset[str]) -> list[Door]:
     """The doors the door mask frees: all but those served as blocked, matched by their world-unique name."""
     blocked_names = {door.name for name, door in world_doors if name in blocked}

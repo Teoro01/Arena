@@ -31,6 +31,7 @@ arena feature isaac install # optional
 arena feature gazebo install # optional
 arena feature mujoco install # optional: MuJoCo simulator (sim:=mujoco)
 arena feature flatsim install # optional: 2D simulator without a renderer (sim:=flatsim)
+arena feature meshnav install # optional: 3D mesh navigation over stairs and escalators (robot.mobile:=meshnav)
 arena feature training install # optional
 arena feature auditory install # optional: sound simulation (acoustics:=arena)
 arena feature hearing install # optional: robot hearing (robot.hearing)

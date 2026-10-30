@@ -112,17 +112,19 @@ def route_phases(
     robot_radius: float,
     goal_tolerance: float,
     climbs: Collection[str] = (),
+    walks: Collection[str] = (),
 ) -> list[TaskPhase]:
-    """Insert elevator rides and crossings of the stair kinds in `climbs` for a robot disc of `robot_radius` before GoTo phases in the abstract frame: explicit `via` hops, then the fewest-hop route to the goal level."""
+    """Insert elevator rides and crossings of the stair kinds in `climbs` for a robot disc of `robot_radius` before GoTo phases in the abstract frame: explicit `via` hops, then the fewest-hop route to the goal level. Stair kinds in `walks` route without phases, the robot's planner crosses them."""
     current_level = world_manager.level_of_point(start.x, start.y) if start is not None else ""
-    climbed = frozenset(climbs)
+    walked = frozenset(walks)
+    climbed = frozenset(climbs) | walked
 
     def rides(hops: Sequence[LevelHop], orientation: Orientation) -> list[GoToPhase]:
         routed: list[GoToPhase] = []
         for hop in hops:
             if isinstance(hop, ElevatorHop):
                 routed.extend(ride_phases(world_manager.elevator_ride(hop, robot_radius), orientation, goal_tolerance))
-            else:
+            elif hop.kind not in walked:
                 routed.extend(crossing_phases(world_manager.stair_ride(hop, robot_radius), goal_tolerance))
         return routed
 

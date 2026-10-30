@@ -345,6 +345,45 @@ def worlds_nav_at_r(
     return [{"world": view.name, "radius": r, "walls_only": walls_only, "levels": [result.asdict() for result in results.values()], "images": legend}, *images]
 
 
+@domain.tool(idempotent=True)
+def worlds_navmesh(
+    world: WorldName,
+    out: Annotated[str | None, Field(description="PLY file to write, a file in a fresh temporary directory when omitted")] = None,
+    resolution: Annotated[float, Field(description="grid spacing of the mesh in meters")] = 0.1,
+) -> dict[str, object]:
+    """The navigation mesh of every walkable floor, stair and escalator for MeshNav, levels stacked when the world's layout is, written as a binary PLY in the simulator frame."""
+    from arena_simulation_setup.shared.navmesh import build_navmesh, navmesh_levels
+
+    if not resolution > 0:
+        raise ToolError(f"resolution is a positive length in meters, got {resolution}")
+    view, loaded, _ = _loaded(world)
+    stacked = loaded.layout == "stacked" and len(loaded.levels) > 1
+    if stacked:
+        shifts = loaded.stack_offsets()
+    elif len(loaded.levels) > 1:
+        shifts = {level_id: (x, y, 0.0) for level_id, (x, y) in loaded.level_origins().items()}
+    else:
+        shifts = dict.fromkeys(loaded.level_ids, (0.0, 0.0, 0.0))
+    mesh = build_navmesh(navmesh_levels(loaded, shifts), resolution)
+    if not len(mesh.faces):
+        raise ToolError(f"world {view.name!r} has no walkable floor at resolution {resolution}", hint="worlds_inspect shows the zones and their floors")
+    target = Path(out).expanduser() if out is not None else Path(tempfile.mkdtemp(prefix="navmesh_")) / f"{view.name}.ply"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mesh.write_ply(target)
+    heights = mesh.vertices[:, 2]
+    return {
+        "world": view.name,
+        "path": str(target),
+        "stacked": stacked,
+        "shifts": {level_id: list(shift) for level_id, shift in shifts.items()},
+        "resolution": resolution,
+        "vertices": len(mesh.vertices),
+        "faces": len(mesh.faces),
+        "components": int(mesh.components().max()) + 1,
+        "z_range": [round(float(heights.min()), 3), round(float(heights.max()), 3)],
+    }
+
+
 @domain.tool(read_only=True)
 def worlds_kg(
     name: WorldName,
