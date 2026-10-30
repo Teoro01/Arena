@@ -37,6 +37,7 @@ from task_generator.simulators.human.support import (
 
 LEGS = Legs(hip=0.015, thigh=0.36, shin=0.375, ankle=0.08)
 BODY = BodyMeasurements(clearance=PelvisClearance(sit=0.12, lie=0.11), legs=LEGS)
+SLOPED = BodyMeasurements(clearance=PelvisClearance(sit=0.12, lie=0.11, seated=((0.0, 0.2), (math.pi, 0.0))), legs=LEGS)
 SEATED = {"l_r_hip": math.pi / 2, "r_r_hip": math.pi / 2, "l_knee": -math.pi / 2, "r_knee": -math.pi / 2}
 
 
@@ -122,6 +123,19 @@ def test_sitting_down_keeps_the_feet_planted_and_ends_upright_on_the_seat():
     pos, body = _leg_fk(down[-1], LEGS)
     assert pos["l_knee"][0] == pytest.approx(pos["l_ankle"][0])
     assert pos["l_knee"][0] - pos["pelvis"][0] + plan.depth - body.r_leg == pytest.approx(0.25 + SHIN_GAP)
+
+
+@pytest.mark.parametrize("height", [0.3, 0.45, 0.6])
+def test_seated_pelvis_rests_at_the_clearance_of_the_hip_flexion_it_sits_with(height):
+    plan = plan_seat(SQUAT, SLOPED, height, 0.25, None, 20.0)
+    seated = plan.frames[-1]["angles"]
+    assert planted_pelvis(seated, LEGS) == pytest.approx(height + SLOPED.clearance.sit_at(plan.fold), abs=1e-3)
+    assert 0.5 * (seated["l_r_hip"] + seated["r_r_hip"]) == pytest.approx(plan.fold, abs=1e-3)
+
+
+def test_sitter_lift_takes_the_clearance_at_its_current_hip_flexion():
+    position, _ = supported_pose(Support("sit", 0.45), SLOPED, SEATED, 1.0, 2.0, 0.0)
+    assert position[2] == pytest.approx(0.45 + 0.1 - 0.47)
 
 
 def test_rising_leans_forward_faster_than_the_recline_then_reverses_the_way_down():

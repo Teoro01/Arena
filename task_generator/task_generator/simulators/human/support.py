@@ -55,7 +55,25 @@ class BodyMeasurements:
     legs: Legs
 
 
-TYPICAL_BODY = BodyMeasurements(clearance=PelvisClearance(sit=0.122, lie=0.117), legs=Legs(hip=0.015, thigh=0.36, shin=0.375, ankle=0.08))
+TYPICAL_SEATED = (
+    (0.0, 0.127),
+    (0.1745, 0.134),
+    (0.3491, 0.139),
+    (0.5236, 0.143),
+    (0.6981, 0.142),
+    (0.8727, 0.14),
+    (1.0472, 0.134),
+    (1.2217, 0.125),
+    (1.3963, 0.115),
+    (1.5708, 0.105),
+    (1.7453, 0.096),
+    (1.9199, 0.089),
+    (2.0944, 0.086),
+    (2.2689, 0.083),
+    (2.4435, 0.081),
+)  # rad, m
+TYPICAL_BODY = BodyMeasurements(clearance=PelvisClearance(sit=0.105, lie=0.119, seated=TYPICAL_SEATED), legs=Legs(hip=0.015, thigh=0.36, shin=0.375, ankle=0.08))
+SEAT_FIT_STEPS = 4  # fixed-point steps between the seated pelvis height and the hip flexion it gives
 
 
 def load_body(model_uri: str) -> BodyMeasurements | None:
@@ -139,7 +157,7 @@ def _profile(frames: tuple[tuple[tuple[str, float], ...], ...], legs: Legs) -> S
     angles = [dict(frame) for frame in frames]
     return SquatProfile(
         pelvis=tuple(planted_pelvis(a, legs) for a in angles),
-        hip=tuple(0.5 * (a.get("l_r_hip", 0.0) + a.get("r_r_hip", 0.0)) for a in angles),
+        hip=tuple(hip_flexion(a) for a in angles),
     )
 
 
@@ -158,6 +176,20 @@ def leg_ik(ahead: float, below: float, legs: Legs) -> tuple[float, float]:
     bend = math.pi - _clamped_acos((legs.thigh**2 + legs.shin**2 - reach**2) / (2.0 * legs.thigh * legs.shin))
     hip = math.atan2(ahead, below) + _clamped_acos((legs.thigh**2 + reach**2 - legs.shin**2) / (2.0 * legs.thigh * reach))
     return hip, -bend
+
+
+def seated_target(body: BodyMeasurements, height: float) -> float:
+    """Pelvis height of a body seated on a surface at height, its seated clearance taken at the hip flexion that height gives."""
+    target = height + body.clearance.sit
+    for _ in range(SEAT_FIT_STEPS):
+        seated = seated_legs(target, body.legs)
+        target = height + body.clearance.sit_at(seated[0] if seated is not None else math.pi / 2.0)
+    return target
+
+
+def hip_flexion(angles: Mapping[str, float]) -> float:
+    """Mean flexion of both hips in rad."""
+    return 0.5 * (angles.get("l_r_hip", 0.0) + angles.get("r_r_hip", 0.0))
 
 
 def seated_legs(pelvis: float, legs: Legs) -> tuple[float, float] | None:
@@ -227,7 +259,7 @@ def seat_pelvis(body: BodyMeasurements, reach: float, front: float | None, back:
 def plan_seat(squat: Sequence[Mapping], body: BodyMeasurements, height: float, front: float | None, back: float | None, fps: float) -> SeatPlan:
     """Frames sitting down onto a seat of the given height along the squat's drop and torso, and back up, the shins dangling from a seat out of their reach."""
     legs = body.legs
-    target = height + body.clearance.sit
+    target = seated_target(body, height)
     stand = legs.hip + legs.thigh + legs.shin + legs.ankle
     profile = squat_profile(squat, legs)
     seated = seated_legs(target, legs)
@@ -277,7 +309,7 @@ def seat_depth(plan: SeatPlan, angles: Mapping[str, float], legs: Legs) -> float
     """How far ahead of the parked point the pelvis is now: under planted feet it follows the legs, dangling it slides from where it stood onto the seat as the hips fold."""
     if plan.feet is not None:
         return plan.feet - ankle_reach(angles, legs)
-    folded = min(1.0, max(0.0, 0.5 * (angles.get("l_r_hip", 0.0) + angles.get("r_r_hip", 0.0)) / plan.fold)) if plan.fold > 0.0 else 1.0
+    folded = min(1.0, max(0.0, hip_flexion(angles) / plan.fold)) if plan.fold > 0.0 else 1.0
     return plan.stand + folded * (plan.depth - plan.stand)
 
 
@@ -302,5 +334,5 @@ def supported_pose(support: Support, body: BodyMeasurements, angles: Mapping[str
     if support.kind == "lie":
         position = np.array([x + pelvis * math.cos(yaw), y + pelvis * math.sin(yaw), support.height + body.clearance.lie])
         return position, _quat_mul(upright, _SUPINE)
-    lift = max(0.0, support.height + body.clearance.sit - pelvis)
+    lift = max(0.0, support.height + body.clearance.sit_at(hip_flexion(angles)) - pelvis)
     return np.array([x + depth * math.cos(yaw), y + depth * math.sin(yaw), lift]), upright

@@ -97,8 +97,10 @@ and a sit clip, which folds the legs under hips kept at standing height, lowers 
 A backend reports the seat or bed a ped rests on through `_support()` (humansim: the seat an agent is parked on, with its
 surface height), and `publish_arena_peds` places it with [`support.py`](support.py) from its joint angles and the
 character's measurements (`pelvis_clearance` and `legs` in the asset annotation, measured by the arena-assets human
-build, else measured off its skin, typical values with a warning without either). A sitter whose planted pelvis would end below its
-seat's surface plus the seated clearance is lifted to it. A lying ped is tipped onto its back, the head away from its
+build, else measured off its skin, typical values with a warning without either). The seated clearance depends on the hip
+flexion: `pelvis_clearance.seated` tabulates the pelvis joint's height above the lowest buttock vertex per flexion, the
+buttocks within 12 cm below the hip joints skinned through it, and `sit_at` interpolates it. A sitter whose planted
+pelvis would end below its seat's surface plus the seated clearance at its current hip flexion is lifted to it. A lying ped is tipped onto its back, the head away from its
 yaw, with the pelvis over its seat at the mattress plus the lying clearance. A possessed ped is left as its stream sends
 it.
 
@@ -106,7 +108,7 @@ A `sit` clip on the body slot waits until the ped is parked on its seat, then pl
 instead ([`plan_seat`](support.py)). The pelvis sits back against the seat's rear edge (`Support.back`, from the sit
 slot's box) by the character's lying clearance, forward only as far as the backs of the calves need to clear the front
 edge (`Support.front`) by `SHIN_GAP`, and at least `PELVIS_MARGIN` behind it. The feet are planted where the calves
-end up vertical. The pelvis drops along the `squat` Animation clip's drop and slides back from over the feet onto the
+end up vertical, the pelvis at the seat's surface plus the seated clearance at the flexion that height gives. The pelvis drops along the `squat` Animation clip's drop and slides back from over the feet onto the
 seat, the legs solved for the planted feet with flat soles and the torso taking the squat's forward lean. The arms
 rise with the fold to `SEATED_ARMS`, forearms forward, clear of the thighs and hips. Once down the
 torso reclines to vertical over `RECLINE_S`, where the layer parks. When the slot ends the ped leans forward again over
