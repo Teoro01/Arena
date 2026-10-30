@@ -20,7 +20,7 @@ Registration in [`__init__.py`](__init__.py) is lazy, so importing the package d
 - `configure(dict)` and `compute() -> World`, which sets `self.diagnostics` and appends to `self.warnings`,
 - optionally `files()` for extra artifacts written into the world directory by `save_generated`, `params()` for the episode binding, and `normalize(str)` for a canonical form of a textual input.
 
-`Configuration` fields become ROS parameters under `algorithm.<generator>.<field>` through [`schema.py`](schema.py). Only `bool`, `int`, `float`, `str` and 2-tuples of numbers are supported, an `int | None` field defaulting to None is declared as an unset integer; `ge`/`le` become the widget's range, and `json_schema_extra={"widget": "sketch"}` asks the panel for the grid editor.
+`Configuration` fields become ROS parameters under `algorithm.<generator>.<field>` through [`schema.py`](schema.py). Only `bool`, `int`, `float`, `str` and 2-tuples of numbers are supported, an `int | None` field needs a `ge` bound and is declared as an integer whose value one below it stands for None (the node maps it back with `config_from_params`, so `-1` is the procedural `barn`), `ge`/`le` become the widget's range, and `json_schema_extra={"widget": "sketch"}` asks the panel for the grid editor.
 
 ## Layout IR
 

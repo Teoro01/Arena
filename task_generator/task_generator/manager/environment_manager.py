@@ -425,6 +425,8 @@ class EnvironmentManager(NodeInterface):
         statics = tuple(self._realizer.realize(s, fid) for fid, level in _world.levels.items() if _match_level_id(fid) for s in level.all_static_entities)
         if self._skip_obstacles:
             statics = ()
+        for static in statics:
+            self.node._register_semantic_entity(static.name.removeprefix(WORLD_ENTITY_PREFIX), self._realizer.prefix(static.name))
 
         if world_map is not None:
             cutouts = [p for d in doors for p in render_door_polygons(d)] + [p for e in elevators for p in render_elevator_polygons(e)]
@@ -480,6 +482,9 @@ class EnvironmentManager(NodeInterface):
         if self._skip_obstacles:
             return
         realized = tuple(self._realizer.realize(obstacle, obstacle.level) for obstacle in setups)
+        for obstacle in realized:
+            if not obstacle.name.startswith(WORLD_ENTITY_PREFIX):
+                self.node._register_semantic_entity(obstacle.name, self._realizer.prefix(obstacle.name))
         await self._cache_polygons(realized)
         await self._human_simulator.spawn_obstacles(realized)
         await self._spawn_episode_lights(setups)

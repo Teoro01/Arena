@@ -12,10 +12,12 @@
     <build_depend>roscpp</build_depend>
     <build_depend>tf2_ros</build_depend>
     <build_depend>geometry_msgs</build_depend>
+    <build_depend>nav_msgs</build_depend>
 
     <exec_depend>roscpp</exec_depend>
     <exec_depend>tf2_ros</exec_depend>
     <exec_depend>geometry_msgs</exec_depend>
+    <exec_depend>nav_msgs</exec_depend>
 
     <export>
         <build_type>ament_cmake</build_type>

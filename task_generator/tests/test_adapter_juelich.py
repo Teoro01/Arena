@@ -8,9 +8,10 @@ from pathlib import Path
 
 import pytest
 
-SET = "hermes_bottleneck"
+SET = "hermes_tjunction"
 CORRIDOR = "POLYGON ((0 -2, 10 -2, 10 2, 0 2, 0 -2), (6 -0.5, 7 -0.5, 7 0.5, 6 0.5, 6 -0.5))"
 ROOM = "POLYGON ((0 0, 6 0, 6 6, 0 6, 0 0))"
+BOTTLENECK = "POLYGON ((-6 -8, 6 -8, 6 10, -6 10, -6 -8), (4.45 -0.5, 4.45 0.5, 2.1 0.5, 2.1 -0.5, 4.45 -0.5), (-0.3 0.5, -3.05 0.5, -3.05 -0.5, -0.3 -0.5, -0.3 0.5))"
 FPS = 16.0
 
 
@@ -28,18 +29,18 @@ def _rows(ident: int, first: int, last: int, start: tuple[float, float], end: tu
     return rows
 
 
-def seed(cache: Path, doi: str | None = None) -> Path:
+def seed(cache: Path, doi: str | None = None, name: str = SET, layouts: tuple[str, str, str] = (CORRIDOR, CORRIDOR, ROOM)) -> Path:
     from task_generator.adapters.juelich import SETS
 
-    entry = SETS[SET]
-    directory = cache / SET
+    entry = SETS[name]
+    directory = cache / name
     directory.mkdir(parents=True)
     metadata = {
         "experiment": {
             "title": "Bottleneck",
             "archive_doi": doi,
             "persons": [{"given_name": "Armin", "family_name": "Seyfried"}, {"given_name": "Maik", "family_name": "Boltes"}],
-            "run": [{"run_name": "b1", "wkt_geometry": CORRIDOR}, {"run_name": "b2", "wkt_geometry": CORRIDOR}, {"run_name": "b3", "wkt_geometry": ROOM}],
+            "run": [{"run_name": f"b{k}", "wkt_geometry": layout} for k, layout in enumerate(layouts, 1)],
         }
     }
     (directory / Path(entry.metadata).name).write_text(json.dumps(metadata))
@@ -106,6 +107,31 @@ def test_floor_is_the_layout_with_its_pillar_walled_in(importer, tmp_path: Path)
     walls = shapely.MultiLineString([((wall.start.x, wall.start.y), (wall.end.x, wall.end.y)) for wall in level.all_walls])
     assert walls.length == pytest.approx(2 * (10 + 4) + 2 * (1 + 1))
     assert walls.covers(shapely.from_wkt(CORRIDOR).interiors[0])
+
+
+def test_bottleneck_bars_reach_the_side_walls_of_an_18_m_passage_around_the_opening(tmp_path: Path) -> None:
+    import shapely
+
+    from task_generator.adapters.juelich import Juelich
+
+    name = "hermes_bottleneck"
+    out = tmp_path / "worlds"
+    Juelich(cache=seed(tmp_path / "cache", name=name, layouts=(BOTTLENECK,) * 3)).import_item(f"{name}/b1", out)
+    level = _world(out, f"juelich_{name}_0").load(validate=True).levels["0"]
+    floor = shapely.union_all([shapely.Polygon([(point.x, point.y) for point in zone.polygon]) for zone in level.zones])
+    walls = shapely.MultiLineString([((wall.start.x, wall.start.y), (wall.end.x, wall.end.y)) for wall in level.all_walls])
+    assert floor.bounds == pytest.approx((0.9 - 9.0, -8.0, 0.9 + 9.0, 10.0))
+    assert floor.intersection(shapely.LineString([(-20.0, -4.0), (20.0, -4.0)])).length == pytest.approx(18.0)
+    assert floor.intersection(shapely.LineString([(-20.0, 0.0), (20.0, 0.0)])).length == pytest.approx(2.4)
+    assert len(shapely.get_parts(floor.difference(shapely.box(-0.3, -0.5, 2.1, 0.5)))) == 2
+    assert walls.covers(floor.boundary)
+
+
+def test_bottleneck_takes_one_polygon_only() -> None:
+    from task_generator.adapters.juelich import PASSAGE_M, bottleneck
+
+    with pytest.raises(ValueError, match="a bottleneck layout is one polygon, got a MultiPolygon"):
+        bottleneck("MULTIPOLYGON (((0 0, 1 0, 1 1, 0 0)), ((2 2, 3 2, 3 3, 2 2)))", PASSAGE_M)
 
 
 def test_tracks_are_in_meters_whether_the_file_is_in_centimeters_or_says_meters(importer, tmp_path: Path) -> None:

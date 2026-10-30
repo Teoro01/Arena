@@ -96,6 +96,7 @@ class _Mech:
         self._lights: dict = {}
         self._light_outputs: dict = {}
         self._light_poses: dict = {}
+        self._articulated: dict = {}
         self._semantics = SemanticsManager(self)
         self._semantics.set_sim("gazebo")
         self.robots: dict[str, Pose] = {}

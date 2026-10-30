@@ -934,6 +934,7 @@ class Light(Named):
     level: str = attrs.field(converter=lambda value: str(value).strip(), default='')
     intrinsic: bool = False
     owner: str = attrs.field(converter=lambda value: str(value).strip(), default='')
+    link: str = attrs.field(converter=lambda value: str(value).strip(), default='')
     glow: str = attrs.field(converter=lambda value: str(value).strip(), default='')
     rig: bool = False
     fixtures: list[Position] = attrs.field(factory=list)
@@ -948,6 +949,8 @@ class Light(Named):
         anchors = sum((self.pose is not None and not ambient, bool(self.attach), bool(self.frame)))
         if self.offset != Pose() and not (self.attach or self.frame):
             raise ValueError(f'light {self.name!r} takes an offset only with attach or frame')
+        if self.link and not (self.attach or self.owner):
+            raise ValueError(f'light {self.name!r} takes a link only with attach or owner')
         for placed in (self.pose, self.offset):
             if placed is not None and not math.isclose(math.sqrt(sum(component * component for component in placed.orientation)), 1.0, abs_tol=1e-3):
                 raise ValueError(f'light {self.name!r} orientation must be a unit quaternion')
@@ -1022,7 +1025,7 @@ class Light(Named):
         return [rank >= dead_fraction for rank in self.fixture_ranks]
 
 
-_OBJECT_LIGHT_KEYS = frozenset({'name', 'fixture', 'pose', 'lumens', 'cct_K', 'cone_deg', 'glow'})
+_OBJECT_LIGHT_KEYS = frozenset({'name', 'fixture', 'pose', 'lumens', 'cct_K', 'cone_deg', 'glow', 'link'})
 
 
 def object_light(owner: str, entry: dict, settings: ObjectLightSettings | None) -> Light:
@@ -1048,6 +1051,7 @@ def object_light(owner: str, entry: dict, settings: ObjectLightSettings | None) 
         dim=settings.dim,
         intrinsic=True,
         glow=entry.get('glow') or '',
+        link=entry.get('link') or '',
     )
 
 

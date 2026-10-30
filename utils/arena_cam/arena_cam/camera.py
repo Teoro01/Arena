@@ -571,7 +571,9 @@ class Camera:
 
         `lockstep` makes the recording frame-exact: with a run active
         the cam rides it as a hard channel gated at 1/fps, with no run it takes its
-        own hold and steps the sim by 1/fps between frames. False when no viewport ran the shot.
+        own hold and steps the sim by 1/fps between frames. False when no viewport ran the shot
+        or a recording failed: a hold, step, capture (after its retries) or encode that failed
+        stops the take there.
         """
         path = record_path(out or default_name("take"))
         return self._run((str(path), float(fps)), force=bool(force), lockstep=bool(lockstep))

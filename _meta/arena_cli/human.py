@@ -25,7 +25,7 @@ def _discover_envs() -> list[str]:
 
 def _matches(ns: str, target: str) -> bool:
     env_ns = os.path.dirname(ns)
-    return target in (ns, env_ns, env_ns.lstrip("/")) or os.path.basename(env_ns) == target
+    return target in (ns, env_ns, env_ns.lstrip("/")) or os.path.basename(env_ns) == (f"env_{target}" if target.isdigit() else target)
 
 
 def _wait_for_env(target: str | None) -> list[str]:

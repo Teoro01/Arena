@@ -17,6 +17,9 @@ EASE_IN_S = 0.25
 EASE_OUT_S = 0.3
 HOLD_FRAMES = 20
 HEAD = ("r_head", "y_head", "p_head")
+FOLLOW_OMEGA_RAD_S = 7.0
+PEAK_RAD_S = math.radians(200.0)
+GAIT_HEAD_MAX_RAD = 0.3
 
 
 @attrs.frozen
@@ -27,6 +30,14 @@ class LookHold:
 
 def _ease(n: int) -> list[float]:
     return [0.5 - 0.5 * math.cos(math.pi * (i + 1) / n) for i in range(n)]
+
+
+def _critical(x: float, v: float, target: float, dt: float) -> tuple[float, float]:
+    """Exact ``dt`` step of a critically damped follower toward a target held over the step."""
+    e = x - target
+    c = v + FOLLOW_OMEGA_RAD_S * e
+    k = math.exp(-FOLLOW_OMEGA_RAD_S * dt)
+    return target + (e + c * dt) * k, (v - FOLLOW_OMEGA_RAD_S * c * dt) * k
 
 
 class LookGesture:
@@ -74,3 +85,45 @@ class LookGesture:
     def retarget(self, hold: object, local: np.ndarray, opts: dict) -> GestureClip:
         assert isinstance(hold, LookHold)
         return self._clip(hold, self.aim(local))
+
+    def follower(self, local: np.ndarray) -> HeadFollower:
+        aim = self.aim(local)
+        return HeadFollower(yaw=aim.yaw, pitch=aim.pitch, aim=aim)
+
+
+@attrs.define
+class HeadFollower:
+    """Critically damped head aim and overlay weight of a live look."""
+
+    yaw: float
+    pitch: float
+    aim: LookHold
+    engaged: float = 0.0
+    weight: float = 0.0
+    yaw_rate: float = 0.0
+    pitch_rate: float = 0.0
+    weight_rate: float = 0.0
+
+    def step(self, dt: float) -> None:
+        if dt <= 0.0:
+            return
+        yaw, yaw_rate = _critical(self.yaw, self.yaw_rate, self.aim.yaw, dt)
+        pitch, pitch_rate = _critical(self.pitch, self.pitch_rate, self.aim.pitch, dt)
+        swept = math.hypot(yaw - self.yaw, pitch - self.pitch)
+        if swept > PEAK_RAD_S * dt:
+            s = PEAK_RAD_S * dt / swept
+            yaw, pitch, swept = self.yaw + (yaw - self.yaw) * s, self.pitch + (pitch - self.pitch) * s, PEAK_RAD_S * dt
+        speed = math.hypot(yaw_rate, pitch_rate)
+        if speed > PEAK_RAD_S:
+            yaw_rate, pitch_rate = yaw_rate * PEAK_RAD_S / speed, pitch_rate * PEAK_RAD_S / speed
+        w, w_rate = _critical(self.weight, self.weight_rate, self.engaged, dt)
+        span = max(math.hypot(self.yaw, self.pitch), math.hypot(yaw, pitch)) + GAIT_HEAD_MAX_RAD
+        budget = max(0.0, PEAK_RAD_S * dt - max(self.weight, w) * swept) / span
+        if abs(w - self.weight) > budget:
+            w = self.weight + math.copysign(budget, w - self.weight)
+        w_rate = max(-budget / dt, min(budget / dt, w_rate))
+        self.yaw, self.pitch, self.yaw_rate, self.pitch_rate = yaw, pitch, yaw_rate, pitch_rate
+        self.weight, self.weight_rate = min(1.0, max(0.0, w)), w_rate
+
+    def frame(self) -> dict:
+        return LookGesture._frame(LookGesture._clamp("y_head", self.yaw), LookGesture._clamp("p_head", self.pitch))

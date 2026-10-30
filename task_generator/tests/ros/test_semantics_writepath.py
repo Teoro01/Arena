@@ -512,19 +512,38 @@ def test_timeline_every_respects_until() -> None:
 
 
 def test_timeline_when_fires_on_rising_edge() -> None:
+    from arena_simulation_setup.shared.judge import Sample
     from arena_simulation_setup.tree.World.Scenario import TimelineEntry
 
-    entry = TimelineEntry(set=[{"entity": "a", "field": "x", "value": "1"}], when={"entity": "s", "field": "active", "is": "true"})
-    stub, cls, fired = _timeline_stub([entry])
-    edge = {"value": False}
-    stub._when_true = lambda when: edge["value"]
-    cls._evaluate_timeline(stub, 0.0)  # false
+    entry = TimelineEntry(set=[{"entity": "a", "field": "x", "value": "1"}], when={"entity": "s", "field": "level", "is": 1})
+    stub, cls, fired = _robot_when_stub([entry], {})
+    value = {"level": "0.0"}
+    stub._sample = Sample(t=0.0, field=lambda entity, field: value[field] if entity == "s" else None)
+    cls._evaluate_timeline(stub, 0.0)
     assert fired == []
-    edge["value"] = True
-    cls._evaluate_timeline(stub, 1.0)  # false -> true edge
+    value["level"] = "1.0"
+    cls._evaluate_timeline(stub, 1.0)
     assert fired == [0]
-    cls._evaluate_timeline(stub, 2.0)  # stays true, no re-fire
+    cls._evaluate_timeline(stub, 2.0)
     assert fired == [0]
+
+
+def test_timeline_when_takes_a_structured_family_node_with_a_hold() -> None:
+    from arena_simulation_setup.shared.judge import Sample
+    from arena_simulation_setup.tree.World.Scenario import TimelineEntry
+
+    entry = TimelineEntry.parse({"when": {"some": "fridge.openness", "ge": 0.9, "for": 2}, "set": [{"entity": "a", "field": "x", "value": "1"}]})
+    stub, cls, fired = _robot_when_stub([entry], {})
+    members = {"left": "0.0", "right": "0.0"}
+
+    def sample(t: float) -> Sample:
+        return Sample(t=t, family=lambda entity, family: dict(members) if (entity, family) == ("fridge", "openness") else None)
+
+    for t, right, expected in ((0.0, "0.0", []), (1.0, "0.95", []), (2.5, "0.95", []), (3.0, "0.95", [0]), (4.0, "0.95", [0])):
+        members["right"] = right
+        stub._sample = sample(t)
+        cls._evaluate_timeline(stub, t)
+        assert fired == expected, t
 
 
 def _robot_when_stub(entries: list, robots: dict[str, tuple[float, float, float]]) -> tuple[object, object, list[int]]:

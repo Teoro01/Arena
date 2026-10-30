@@ -11,13 +11,17 @@ from ament_index_python.packages import PackageNotFoundError, get_package_share_
 from arena_robots.assembly import ResolvedAssembly
 from arena_robots.catalog import Catalog, render_effective_control
 
+from arena_runtime.constants import SimSimulator
+
 if typing.TYPE_CHECKING:
     from arena_robots.Robot import RobotView
 
 
-def load_control_yaml(config_uri: str) -> dict:
+def load_control_yaml(config_uri: str, sim: SimSimulator | None = None) -> dict:
     """Resolve a ``control.config`` URI (``package://...`` or a bare path) and
-    load the raw YAML as a dict. No frame prefixing; the caller merges/prefixes."""
+    load the raw YAML as a dict, overlaid key by key with its sibling
+    ``<name>.<sim>.yaml`` when ``sim`` is given and that file exists. No frame
+    prefixing; the caller merges/prefixes."""
     if config_uri.startswith("package://"):
         pkg, _, sub = config_uri[len("package://") :].partition('/')
         try:
@@ -27,11 +31,26 @@ def load_control_yaml(config_uri: str) -> dict:
     else:
         src_path = config_uri
 
-    with open(src_path) as f:
+    data = _read_mapping(src_path)
+    if sim is None:
+        return data
+    root, ext = os.path.splitext(src_path)
+    overlay_path = f"{root}.{sim.value}{ext}"
+    if not os.path.isfile(overlay_path):
+        return data
+    return _overlay(data, _read_mapping(overlay_path))
+
+
+def _read_mapping(path: str) -> dict:
+    with open(path) as f:
         data = yaml.safe_load(f)
     if not isinstance(data, dict):
-        raise ValueError(f"control config at {src_path} must be a mapping; got {type(data).__name__}")
+        raise ValueError(f"control config at {path} must be a mapping; got {type(data).__name__}")
     return data
+
+
+def _overlay(base: dict, top: dict) -> dict:
+    return {**base, **{k: _overlay(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v for k, v in top.items()}}
 
 
 def _prefix_frames(obj: object, frame_prefix: str) -> object:
@@ -72,16 +91,17 @@ def effective_control_yaml(
     sim_path: str,
     frame_prefix: str,
     *,
+    sim: SimSimulator,
     catalog: Catalog | None = None,
     prefix: str = 'robot_',
 ) -> str:
     """Render+write the ros2_control YAML for one robot instance, merging
-    ``resolved``'s placement control blocks into the chassis config first.
-    Robots without an assembly (``resolved`` is ``None``) take the raw chassis
-    config unchanged."""
+    ``resolved``'s placement control blocks into the chassis config with its
+    ``sim`` overlay first. Robots without an assembly (``resolved`` is ``None``)
+    take that chassis config unchanged."""
+    base_control = load_control_yaml(config_uri, sim)
     if resolved is None:
-        return render_ros2_control_yaml(config_uri, sim_path, frame_prefix)
-    base_control = load_control_yaml(config_uri)
+        return render_ros2_control_yaml(config_uri, sim_path, frame_prefix, data=base_control)
     merged, _ = render_effective_control(resolved, base_control, catalog if catalog is not None else Catalog(), prefix=prefix)
     return render_ros2_control_yaml(config_uri, sim_path, frame_prefix, data=merged)
 

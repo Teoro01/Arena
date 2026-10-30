@@ -51,6 +51,23 @@ def _find_le(metadata: list) -> float | None:
     return None
 
 
+def _unset_int(field_info: pydantic.fields.FieldInfo) -> int | None:
+    """The int that stands in for None of an `int | None` field on the ROS side, one below its lower bound."""
+    annotation = field_info.annotation
+    if typing.get_origin(annotation) not in (typing.Union, types.UnionType) or set(typing.get_args(annotation)) != {int, type(None)}:
+        return None
+    ge = _find_ge(list(field_info.metadata))
+    if ge is None:
+        raise ValueError(f"Optional int field needs a lower bound to stand None in for, got {annotation!r}")
+    return int(ge) - 1
+
+
+def config_from_params(model_cls: type[pydantic.BaseModel], config: dict) -> dict:
+    """Map the ROS stand-ins of `int | None` fields in config back to None."""
+    unset = {name: _unset_int(info) for name, info in model_cls.model_fields.items()}
+    return {leaf: None if unset.get(leaf) is not None and value == unset[leaf] else value for leaf, value in config.items()}
+
+
 def declare_config_params(node: ROSParamServer, namespace_prefix: str, model_cls: type[pydantic.BaseModel]) -> None:
     """Declare one ROS param per scalar/pair field of model_cls under namespace_prefix.<field>."""
     for field_name, field_info in model_cls.model_fields.items():
@@ -82,7 +99,11 @@ def declare_config_params(node: ROSParamServer, namespace_prefix: str, model_cls
         if annotation is bool:
             declare_bool(node, name, bool(default), label=label)
         elif annotation is int:
-            declare_int(node, name, default, label=label, lo=int(ge) if ge is not None else None, hi=int(le) if le is not None else None)
+            unset = _unset_int(field_info)
+            if unset is None:
+                declare_int(node, name, default, label=label, lo=int(ge) if ge is not None else None, hi=int(le) if le is not None else None)
+            else:
+                declare_int(node, name, unset if default is None else default, label=label, description=f"{unset} = unset", lo=unset, hi=int(le) if le is not None else None)
         elif annotation is float:
             declare_double(node, name, float(default), label=label, lo=float(ge) if ge is not None else None, hi=float(le) if le is not None else None)
         elif annotation is str:

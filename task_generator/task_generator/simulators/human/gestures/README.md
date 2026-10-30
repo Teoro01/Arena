@@ -83,7 +83,11 @@ so an off-envelope aim yields a flagged hold, never a fault.
   and continuous across retargets, and appends one period after the park frame as a loop tail
   (`Animation.loop_from`). No wall clock anywhere.
 - `look`: closed-form head yaw/pitch from the rest-pose eye point (`skeleton.fk` `eye`, torso assumed upright),
-  clamped to the head limits, ease-in 0.25 s, ease-out 0.3 s, retargets ease over 0.25 s.
+  clamped to the head limits. A look slot plays no clips: every tick a `HeadFollower` steps its yaw, pitch and
+  overlay weight as critically damped followers (`FOLLOW_OMEGA_RAD_S` 7 rad/s, exact step over the real dt) toward
+  the current aim and toward 1 while the channel lives or 0 on release, the shown head capped at `PEAK_RAD_S`
+  (200 deg/s). Look slots retarget every tick (no `RETARGET_EPS_M`, no `HOLD_MIN_S`), and the slot ends once the
+  released weight is below `SETTLED_WEIGHT`.
 
 The world target is converted into the ped frame (x forward, y left, z up, origin on the floor under the ped)
 once per clip from the bus pose. Generator reports that flag `ok=False`, `near_target_fallback`, or `relaxed`

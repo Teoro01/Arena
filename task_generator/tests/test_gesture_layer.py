@@ -23,7 +23,7 @@ from task_generator.simulators.human.gestures import (
     resample,
     world_to_local,
 )
-from task_generator.simulators.human.gestures.look import HEAD, LookGesture, LookHold
+from task_generator.simulators.human.gestures.look import FOLLOW_OMEGA_RAD_S, HEAD, PEAK_RAD_S, LookGesture, LookHold
 from task_generator.simulators.human.gestures.point import PointGesture
 from task_generator.simulators.human.pointing.contract import LIMITS, arm_dofs
 
@@ -297,7 +297,7 @@ def test_head_only_starts_no_arm(rig):
     tick(mgr, 1, r)
     assert set(mgr._ped_blend[1]) == {"head"}
     st = head_slot(layer, 1)
-    assert st.phase == "ramp"
+    assert st.phase == "hold"
     tick(mgr, 1, r, n=6)
     assert st.phase == "hold"
     a = tick(mgr, 1, r)
@@ -305,7 +305,7 @@ def test_head_only_starts_no_arm(rig):
     tick(mgr, 1, r, n=int(HOLD_MIN_S / DT))
     tick(mgr, 1, None)
     assert st.phase == "release"
-    tick(mgr, 1, None, n=20)
+    tick(mgr, 1, None, n=30)
     assert 1 not in layer._agents
 
 
@@ -513,6 +513,59 @@ def test_look_frames_aim_within_limits_and_release_to_zero():
     far = g.start(np.array([0.5, 3.0, 5.0]), {})
     assert far.hold.yaw <= LIMITS["y_head"][1] and far.hold.pitch <= LIMITS["p_head"][1]
     assert g.bind("head", local, {"x": 1}) == {"x": 1}
+
+
+T_ON, T_STOP, T_OFF, T_END = 0.5, 4.0, 6.5, 9.0
+
+
+def pass_by(dt: float) -> dict[str, np.ndarray]:
+    """A walker with a target passing 1.5 m to its left at 1 m/s, then halting, then dropped: per-tick shown, aimed and gait head."""
+    mgr = AnimationManager(logger=StubLogger(), fps=20.0)
+    layer = GestureLayer(mgr, StubLogger())
+    mgr.gesture_hook = layer
+    gait = AnimationManager(logger=StubLogger(), fps=20.0)
+    look = LookGesture()
+    pose = (0.0, 0.0, 0.0)
+    rows = []
+    for k in range(1, int(round(T_END / dt)) + 1):
+        t = k * dt
+        at = (4.0 - min(max(t - T_ON, 0.0), T_STOP - T_ON), 1.5, 1.0)
+        live = T_ON <= t + 1e-9 < T_OFF
+        shown = mgr.compute(1, 1, 1.2, dt, gesture=GestureRequest(channels=(head_ch(at),) if live else (), pose=pose, moving=True))
+        base = gait.compute(1, 1, 1.2, dt)
+        aim = look.aim(world_to_local(at, pose))
+        rows.append((t, shown["y_head"], shown["p_head"], aim.yaw, aim.pitch, base["y_head"], base["p_head"]))
+    assert 1 not in layer._agents and 1 not in mgr._ped_blend
+    t, yaw, pitch, aim_yaw, aim_pitch, gait_yaw, gait_pitch = np.array(rows).T
+    return {"t": t, "yaw": yaw, "pitch": pitch, "aim_yaw": aim_yaw, "aim_pitch": aim_pitch, "gait_yaw": gait_yaw, "gait_pitch": gait_pitch}
+
+
+def test_look_follows_a_passing_target_smoothly_at_any_tick_rate():
+    w = FOLLOW_OMEGA_RAD_S
+    runs = {}
+    for dt in (1.0 / 30.0, 1.0 / 20.0):
+        r = runs[dt] = pass_by(dt)
+        t = r["t"]
+        vel = np.diff(r["yaw"]) / dt
+        acc = np.abs(np.diff(vel)) / dt
+        at = t[2:]
+        on, off = int(np.argmax(t + 1e-9 >= T_ON)), int(np.argmax(t + 1e-9 >= T_OFF)) - 1
+        gap = max(abs(r["aim_yaw"][on] - r["gait_yaw"][on]), abs(r["yaw"][off] - r["gait_yaw"][off]))
+        stop_rate = abs(r["aim_yaw"][t <= T_STOP][-1] - r["aim_yaw"][t <= T_STOP][-2]) / dt
+        gait_acc = float(np.max(np.abs(np.diff(r["gait_yaw"], 2)))) / dt**2
+        assert acc.max() <= w**2 * gap + w / math.e * stop_rate + gait_acc
+        tracking = (at > T_ON + 1.5) & (at <= T_STOP)
+        aim_acc = float(np.max(np.abs(np.diff(r["aim_yaw"], 2))[(at > T_ON + 1.0) & (at <= T_STOP)])) / dt**2
+        settled = w**2 * gap * (1.0 + w * 1.5) * math.exp(-w * 1.5)
+        assert acc[tracking].max() <= 1.1 * aim_acc + settled + 0.02
+        speed = np.hypot(np.diff(r["yaw"]), np.diff(r["pitch"])) / dt
+        assert speed.max() <= PEAK_RAD_S
+        held = (t > T_OFF - 0.5) & (t + 1e-9 < T_OFF)
+        assert np.degrees(np.abs(r["yaw"] - r["aim_yaw"])[held]).max() < 1.0
+        assert np.degrees(np.abs(r["pitch"] - r["aim_pitch"])[held]).max() < 1.0
+        assert r["yaw"][-1] == r["gait_yaw"][-1] and r["pitch"][-1] == r["gait_pitch"][-1]
+    fast, slow = runs[1.0 / 30.0], runs[1.0 / 20.0]
+    assert np.degrees(np.abs(fast["yaw"][2::3] - slow["yaw"][1::2])).max() < 0.5
 
 
 # -- timing ---------------------------------------------------------------
