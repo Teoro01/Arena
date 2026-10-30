@@ -116,6 +116,7 @@ class DrlAdapter(MobileAdapter):
         self._edge_node: PlannerEdgeNode | None = None
         self._run_loop_task: asyncio.Task | None = None
         self._current_phase: TaskPhase | None = None
+        self._parked = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -324,6 +325,7 @@ class DrlAdapter(MobileAdapter):
         assert phase.pose is not None
         robot._goal_pos = phase.pose  # pylint: disable=protected-access
         self._current_phase = phase
+        self._parked = False
 
         task = self._run_loop_task
         if task is not None and task.done() and not task.cancelled():
@@ -341,6 +343,13 @@ class DrlAdapter(MobileAdapter):
         goal.target = self._phase_to_pose_stamped(phase, robot)
         goal.pose_tolerance, goal.yaw_tolerance = self._resolve_tolerances(phase, robot)
         await self.client.send_goal(goal)
+
+    def on_phase_tick(self, phase: TaskPhase, robot: RobotManager) -> None:
+        """Zero the planner's commands while the phase holds at its goal, redispatch if the robot leaves the tolerance."""
+        if self._edge_node is None or robot.waiting == self._parked:
+            return
+        self._parked = robot.waiting
+        robot.node.event_loop.create_task(self._edge_node.request_cancel() if self._parked else self.dispatch_phase(phase, robot))
 
     def _phase_to_pose_stamped(
         self,
@@ -372,6 +381,7 @@ class DrlAdapter(MobileAdapter):
         if self.client.is_done() is False:
             self.client.cancel()
         await super().on_reset(robot, ctx)
+        self._parked = False
         if self._edge_node is not None and self._current_phase is not None:
             assert isinstance(self._current_phase, GoToPhase)
             await self._edge_node.request_reset(

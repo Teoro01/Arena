@@ -50,6 +50,15 @@ def workspace() -> Workspace:
     )
 
 
+def build_python() -> str:
+    """The interpreter colcon builds Python extensions for, empty when uv finds none."""
+    import subprocess
+
+    from arena_cli.common import _env
+
+    return subprocess.run(["uv", "python", "find"], cwd=_env("ARENA_DIR"), capture_output=True, text=True, check=False).stdout.strip()
+
+
 def resolve_packages(argv: list[str]) -> list[str]:
     """Package names a colcon selection argv resolves to."""
     import subprocess
@@ -106,8 +115,6 @@ def build_main(argv: list[str]) -> int:
     """Run colcon build with the workspace package-skip and cmake-args logic. Assumes cwd is ARENA_WS_DIR."""
     import subprocess
 
-    from arena_cli.common import _env
-
     args = list(argv)
 
     skip_old_env = os.environ.get("SKIP_OLD")
@@ -118,7 +125,7 @@ def build_main(argv: list[str]) -> int:
 
     ws = workspace()
 
-    python = subprocess.run(["uv", "python", "find"], cwd=_env("ARENA_DIR"), capture_output=True, text=True, check=False).stdout.strip()
+    python = build_python()
     cmake_args = [f"-DPython3_EXECUTABLE={python}"] if python else []
 
     display_args = ["--symlink-install", "--continue-on-error", "--cmake-args", *cmake_args]

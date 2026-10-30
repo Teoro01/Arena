@@ -1,15 +1,23 @@
-"""In-process ArenaNode on the dummy or flatsim host plus a probe node, for lockstep tests without gz."""
+"""In-process ArenaNode on the dummy, flatsim or gazebo host plus a probe node, for lockstep tests."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import shutil
+import signal
+import subprocess
 import typing
+from pathlib import Path
 
 import pytest
 
 DT = 0.02
 LATCHED_DEPTH = 1
+GZ_WORLD = f"""<?xml version="1.0"?>
+<sdf version="1.9"><world name="default"><physics type="ode"><max_step_size>{DT}</max_step_size><real_time_factor>1.0</real_time_factor></physics></world></sdf>
+"""
 
 
 class Rig:
@@ -154,6 +162,8 @@ async def _run(scenario: typing.Callable[[Rig], typing.Awaitable[None]], sim: st
     finally:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(arena.teardown(), timeout=5.0)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(arena.kill_launches(), timeout=10.0)
         if arena._clock_task is not None:
             arena._clock_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -189,3 +199,32 @@ def flatsim_rig() -> typing.Callable[[typing.Callable[[Rig], typing.Awaitable[No
         asyncio.run(asyncio.wait_for(_run(scenario, "flatsim"), timeout=timeout))
 
     return run
+
+
+@pytest.fixture()
+def gazebo_rig(tmp_path: Path) -> typing.Iterator[typing.Callable[[typing.Callable[[Rig], typing.Awaitable[None]]], None]]:
+    """Runs `scenario(rig)` against a spinning ArenaNode(sim=gazebo), a running headless gz server on an empty world and its /clock bridge."""
+    if shutil.which("gz") is None:
+        pytest.skip("gz is not on PATH")
+    pytest.importorskip("ros_gz_interfaces")
+    world = tmp_path / "default.sdf"
+    world.write_text(GZ_WORLD)
+    processes = [
+        subprocess.Popen(["gz", "sim", "-s", "-r", str(world)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True),
+        subprocess.Popen(["ros2", "run", "ros_gz_bridge", "parameter_bridge", "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True),
+    ]
+
+    def run(scenario: typing.Callable[[Rig], typing.Awaitable[None]], *, timeout: float = 120.0) -> None:
+        asyncio.run(asyncio.wait_for(_run(scenario, "gazebo"), timeout=timeout))
+
+    try:
+        yield run
+    finally:
+        for process in processes:
+            os.killpg(process.pid, signal.SIGINT)
+        for process in processes:
+            try:
+                process.wait(timeout=15.0)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()

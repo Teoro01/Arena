@@ -193,13 +193,18 @@ def _route_reachable(grid: Callable[[], Grid | None], zones: list[dict[str, Any]
     return True
 
 
+def _zones(root: Path, loaded: World) -> list[dict[str, Any]]:
+    """The named zones of a world's first level."""
+    doc = first_level(root, loaded)
+    if doc is None:
+        raise FileNotFoundError(f"{root.name}: no world.yaml")
+    return doc.get("zones") or []
+
+
 def _world_parts(root: Path, loaded: World, grid: Callable[[], Grid | None], radius: float = ROBOT_CLEAR) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """A world's zones and a robot copied from one of its scenarios, else the two most separated reachable zones."""
     world = root.name
-    doc = first_level(root, loaded)
-    if doc is None:
-        raise FileNotFoundError(f"{world}: no world.yaml")
-    zones = doc.get("zones") or []
+    zones = _zones(root, loaded)
 
     for cand in sorted((root / "scenarios").glob("*/scenario.yaml")):
         robots = read_scenario(cand).get("robots") or []
@@ -242,7 +247,7 @@ def _cmd_zones(args: argparse.Namespace) -> int:
         return _bare(args)
     root = world_root(args.worlds, args.world)
     world = load_world(root)
-    zones, _ = _world_parts(root, world, _grid_loader(root, world))
+    zones = _zones(root, world)
     overrides = world_roles(root, world)
     by_role = zones_by_role(zones, overrides)
     for role, names in by_role.items():

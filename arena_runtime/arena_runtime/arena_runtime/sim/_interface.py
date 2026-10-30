@@ -2,7 +2,6 @@
 
 import abc
 import asyncio
-import math
 import typing
 from collections.abc import Collection, Iterable, Mapping, Sequence
 
@@ -26,6 +25,9 @@ from task_generator.shared import (
 if typing.TYPE_CHECKING:
     import arena_robots.Robot
     from arena_rclpy_mixins import ArenaMixinNode
+    from arena_simulation_setup.utils.articulation import Values
+
+    from ._articulation import ArticulatedObject, JointCommand
 
 
 _BOX_FLOOR_CLEARANCE = 0.01  # keep the box base off the floor plane to avoid z-fight / poke-through
@@ -57,17 +59,8 @@ async def resolve_obstacle_box(obstacle: Obstacle) -> tuple[tuple[float, float, 
 
 
 def offset_pose(pose: Pose, center: tuple[float, float, float]) -> Pose:
-    """Box pose with the bbox centre applied in the obstacle's local frame."""
-    cx, cy, cz = center
-    yaw = pose.orientation.to_yaw()
-    return Pose(
-        position=Position(
-            x=pose.position.x + cx * math.cos(yaw) - cy * math.sin(yaw),
-            y=pose.position.y + cx * math.sin(yaw) + cy * math.cos(yaw),
-            z=pose.position.z + cz,
-        ),
-        orientation=pose.orientation,
-    )
+    """Box pose with the bbox center applied in the obstacle's local frame."""
+    return Pose(position=pose * Position(*center), orientation=pose.orientation)
 
 
 @typing.runtime_checkable
@@ -280,7 +273,9 @@ class MechanismITF:
         from collections.abc import Callable
 
         from arena_simulation_setup.shared.semantics import SemanticCfg
+        from task_generator.manager.realizer import Realizer
 
+        from ._articulation import ArticulatedObject
         from ._mechanism_shim import _DoorRuntime, _ElevatorRuntime, _StairsRuntime
         from ._semantics import SemanticChange, SemanticEntitySnapshot, SemanticsManager
 
@@ -302,16 +297,21 @@ class MechanismITF:
         _light_outputs: dict[str, tuple[float, float]]
         _light_poses: dict[str, tuple[Position, float]]
         _incident_callback: Callable[[str], None] | None
-
-        async def obstacle_spawn(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]: ...
-        async def obstacle_move(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]: ...
-        async def obstacle_delete(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]: ...
+        _articulated: dict[str, ArticulatedObject]
+        _realizer: Realizer
 
         @property
         def node(self) -> ArenaMixinNode: ...
 
+        async def obstacle_spawn(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]: ...
+
+        async def obstacle_move(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]: ...
+
+        async def obstacle_delete(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]: ...
+
     SIM_NAME: typing.ClassVar[str]
     STACKS_LEVELS: typing.ClassVar[bool] = False
+    ARTICULATED_PHYSICS: typing.ClassVar[bool] = False
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
@@ -336,6 +336,7 @@ class MechanismITF:
         self._light_outputs = {}
         self._light_poses = {}
         self._incident_callback = None
+        self._articulated = {}
 
     def _register_agent_robot(self, robot: Robot, model_params: "arena_robots.Robot.ModelParams") -> None:
         """Track a spawned robot for disc and pose reads, bringing up the TF machinery on first use."""
@@ -409,6 +410,32 @@ class MechanismITF:
         ok = await self.remove_stairs(tuple(self._stair_runtime))
         ok = await self.remove_elevators(tuple(self._elevator_runtime)) and ok
         return await self.remove_doors(tuple(self._door_runtime)) and ok
+
+    async def spawn_objects(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
+        """Spawn obstacles, an articulated one as one obstacle per link bundle, its joints driven by the tick loop."""
+        from ._articulation import spawn_objects
+
+        return await spawn_objects(self, obstacles)
+
+    async def move_objects(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
+        """Move obstacles, an articulated one placed with its joints back at the initial values of its `joints`."""
+        from ._articulation import move_objects
+
+        return await move_objects(self, obstacles)
+
+    async def delete_objects(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
+        """Delete obstacles, an articulated one with all its link obstacles and its semantics."""
+        from ._articulation import delete_objects
+
+        return await delete_objects(self, obstacles)
+
+    async def _articulated_spawn(self, objects: "Sequence[ArticulatedObject]") -> Sequence[bool]:
+        """Spawn each object as one physics model at its obstacle's pose, links with their inertias, joints at their current values with their dynamics and drives off."""
+        raise NotImplementedError(f"{self.SIM_NAME} has no articulated physics")
+
+    async def _articulated_drive(self, commands: "Sequence[JointCommand]") -> "Sequence[Values | None]":
+        """Set the placed joints onto their reference at rest, switch each joint's drive on toward its reference or off, then read every movable joint, None for an object the simulator lost."""
+        raise NotImplementedError(f"{self.SIM_NAME} has no articulated physics")
 
     async def spawn_lights(self, lights: Sequence[Light]) -> bool:
         """Spawn lights, their semantic output reaches the renderer on the mechanism tick."""
@@ -511,7 +538,7 @@ class MechanismITF:
         return
 
     async def _move_light(self, light: Light, position: Position, yaw: float) -> None:
-        """Place a frame-anchored light at a map position, its direction turned by yaw. No-op by default."""
+        """Place a frame-anchored or link-riding light at a map position, its direction turned by yaw. No-op by default."""
         return
 
     def frame_pose(self, frame: str) -> tuple[Position, float] | None:

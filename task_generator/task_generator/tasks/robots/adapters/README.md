@@ -65,6 +65,11 @@ and a named target is named. A pose the zones do not cover falls back to its
 coordinates. `EpisodeRecord.phases` keeps the instruction and its source per
 phase.
 
+While a phase holds at its goal (`hold_time`, `until`), `DrlAdapter` cancels the
+planner through its edge node, which zeroes `cmd_vel`, since a learned policy has
+no stop of its own and the park judge wants the robot still. It redispatches the
+phase if the robot leaves the tolerance before the hold ends.
+
 `DrlAdapter` (and so `VlaAdapter`) can send the signals its planner lists
 under `signals:` in `planner.yaml`. For a goto phase with a `signal`, it
 passes the expected signal to the planner in the reset payload and ends the

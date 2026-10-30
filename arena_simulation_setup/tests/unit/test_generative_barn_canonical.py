@@ -262,14 +262,29 @@ def test_ros_node_declares_index_and_source_and_dispatches_on_them():
     node = WorldGeneratorROS()
     try:
         declared = node.get_parameters_by_prefix("algorithm.barn")
-        assert (declared["index"].value, declared["source"].value) == (None, "")
+        assert (declared["index"].value, declared["source"].value) == (-1, "")
         assert list(preview().extent) == pytest.approx(procedural)
+        assert isinstance(node._active, WorldGeneratorBarn)
+        assert list(preview(json.dumps({"index": -1})).extent) == pytest.approx(procedural)
         assert isinstance(node._active, WorldGeneratorBarn)
         assert list(preview(json.dumps({"index": INDEX, "source": str(FIXTURE.parent)})).extent) == pytest.approx(canonical)
         assert isinstance(node._active, WorldGeneratorBarnCanonical)
         node.set_parameters([Parameter("algorithm.barn.index", value=INDEX), Parameter("algorithm.barn.source", value=str(FIXTURE.parent))])
         assert list(preview().extent) == pytest.approx(canonical)
         assert isinstance(node._active, WorldGeneratorBarnCanonical)
+    finally:
+        node.destroy_node()
+
+
+def test_ros_node_gets_and_describes_every_generator_parameter():
+    pytest.importorskip("world_generator_msgs")
+    from arena_simulation_setup.generative.world.world_generator_ros import WorldGeneratorROS
+
+    node = WorldGeneratorROS()
+    try:
+        names = node.list_parameters(["algorithm"], 10).names
+        assert "algorithm.barn.index" in names
+        assert len(node.get_parameters(names)) == len(node.describe_parameters(names)) == len(names)
     finally:
         node.destroy_node()
 

@@ -39,8 +39,8 @@ already up) and is the canonical entry point for most sessions.
 ### 1. Smoke check - dummy sim, empty map
 
 No physics engine. Useful for verifying that the ROS graph comes up without
-hardware or GPU. The `sim` argument defaults to `gazebo`; pass `sim:=dummy`
-explicitly for this plumbing-only mode.
+hardware or GPU. The `sim` argument defaults to the installed simulator (see
+[sim:=](#sim)), so pass `sim:=dummy` explicitly for this plumbing-only mode.
 
 ```bash
 arena launch \
@@ -53,7 +53,7 @@ arena launch \
 
 | Arg | Implication |
 |---|---|
-| `sim:=dummy` | No physics engine; a `map->dummy` static TF is published instead. Must be explicit - the default is `gazebo`. |
+| `sim:=dummy` | No physics engine, a `map->dummy` static TF is published instead. Explicit, the default is the installed simulator. |
 | `world:=map_empty` | Loads the empty map from `arena_simulation_setup` |
 | `robot:=jackal` | Single jackal; `mobile` adapter defaults to `none` (dummy sim has no nav2) |
 | `task.robots:=explore` | Robot gets fresh random goals continuously |
@@ -213,7 +213,25 @@ arena viz --all
 `arena env` and `arena viz` both wait forever (10s warning cadence) if the
 runtime or env isn't up yet, so terminal ordering doesn't matter.
 
-To tear an env down by id, call the cleanup service (or use
+The same session fits in one terminal with `--bg`, which detaches each piece
+and returns:
+
+```bash
+arena runtime --bg sim:=gazebo world:=map_empty   # supervisor detached, log under ~/.ros/log
+arena env --bg robot:=jackal                      # the runtime spawns and owns the env, prints its id
+arena viz --bg 0                                  # rviz detached, closing the window stops it
+arena env 0 down                                  # shut env 0 down through its lifecycle
+arena runtime down                                # stop every --bg launch and viz of this ROS domain
+```
+
+`arena launch --bg` detaches the whole composite the same way. `arena env
+--bg` waits for `/arena/spawn_env`, then until the env reaches ACTIVE, and the
+env lives until `arena env <id> down` or until the runtime stops.
+`arena runtime down` sends SIGINT to each background launch and viz (recorded
+under `/tmp/arena-bg/<ROS_DOMAIN_ID>/`), again up to three times while one
+survives, and refuses when none runs. A foreground runtime stops with Ctrl-C.
+
+To remove an env's sim entities by id, call the cleanup service (or use
 `arena cleanup <env_id>`, see [CLI verbs](#cli-verbs)).
 
 ---
@@ -351,14 +369,14 @@ task.episode.fail_on_collision:=true  # abort the episode as FAILED when the rob
 
 ### sim:=
 
-Default is `gazebo`. Valid values:
+Default is `arena settings sim [auto|dummy|<simulator>]`, read by every launch when it starts. `auto` (the default setting) takes the first installed simulator in `SIM_ORDER` ([defaults.py](arena_bringup/defaults.py)), or `dummy` when none is installed. A setting naming a simulator that is no longer installed falls back to `auto` with a warning. Valid values:
 
 | Value | Meaning |
 |---|---|
-| `gazebo` (default) | gz-sim 8, dart physics, ogre renderer. `human` defaults to `arena` (arena_humansim). |
+| `gazebo` | gz-sim 8, dart physics, ogre renderer. `human` defaults to `arena` (arena_humansim). |
 | `isaac` | Isaac Sim via `arena feature isaac launch`. `mobile` defaults to `nav2`. |
 | `flatsim` | [flatsim](../flatsim/README.md) server, 2D Box2D with no renderer, one world for every env. Needs `arena feature flatsim install`. Odom, tf, laserscans, point clouds, IMU and contacts are computed from geometry, camera images are absent. `human` defaults to `arena`, `mobile` to `nav2`. |
-| `dummy` | No physics engine; a static `map->dummy` TF is published. For plumbing-only checks (no GPU, no controllers). Must be passed explicitly. |
+| `dummy` | No physics engine; a static `map->dummy` TF is published. For plumbing-only checks (no GPU, no controllers). The default when no simulator is installed. |
 
 ### sim.flatsim.*
 
@@ -517,11 +535,14 @@ common entry points. Verbs relevant to bringup:
 
 | Verb | Wraps | Purpose |
 |---|---|---|
-| `arena launch [args]` | bash composite | All-in-one: `arena runtime` + N × `arena env` + optional `arena viz --all`. |
-| `arena runtime [args]` | `arena_runtime.launch.py` | Runtime-only launch (sim + `arena_node`, no envs). |
+| `arena launch [--bg] [args]` | bash composite | All-in-one: `arena runtime` + N × `arena env` + optional `arena viz --all`. `--bg` detaches it. |
+| `arena runtime [--bg] [args]` | `arena_runtime.launch.py` | Runtime-only launch (sim + `arena_node`, no envs). `--bg` detaches it. |
+| `arena runtime down` | SIGINT to the recorded supervisors | Stop every `--bg` launch and viz of this ROS domain, see [section 6](#6-runtime--client-mode-dynamic-envs). |
 | `arena env [args]` | `task_generator.launch.py` | Attach one task-generator env to a running runtime. |
+| `arena env --bg [args]` | `/arena/spawn_env` | Have the runtime spawn and own one env, print its id and log path once it is ACTIVE. |
+| `arena env <env_id> down` | `/arena/despawn_env` | Shut one env down through its lifecycle, attached or spawned. |
 | `arena env [ENV] semantics ...` | `state/semantics`, `semantics/set` | List, inspect, set or watch the semantic entities of a running env (lights, doors, signals, sounds, zones) by authored name: `arena env 0 semantics hall level=0.3`, `arena env --all semantics --kind light lit=false`. `arena env semantics --help` lists the forms. |
-| `arena viz [target]` | `ros2 run rviz_utils rviz_config` | Attach rviz to a running env; see [arena viz](#arena-viz). |
+| `arena viz [--bg] [target]` | `ros2 run rviz_utils rviz_config` | Attach rviz to a running env; see [arena viz](#arena-viz). `--bg` detaches it. |
 | `arena human [target]` | `rqt --standalone human_steering` | Attach the pedestrian-steering panel to a running env. Target/`--ns` resolution matches [arena viz](#arena-viz). Interactive control works on any backend serving `human/*`: driving a ped possesses it, the engine reclaims it about a second after you stop, `human:=dummy` is the engine-less puppet stage. `arena launch` auto-attaches one panel per env whenever the resolved human backend is `dummy`, unless `headless:=true`. This verb re-attaches after closing it. |
 | `arena robot <model>\|rm\|ls` | `runtime/spawn_robot`, `runtime/despawn_robot`, `state/robots` | Spawn, despawn, or list robots in a running fleet; see [arena robot](#arena-robot). |
 | `arena cleanup <env_id>` | `/arena/cleanup_namespace` service | Force-clean an env's namespace by id (calls the service for both the `env_<id>_` and `env_<id>/` prefixes, covering gazebo and isaac layouts). |

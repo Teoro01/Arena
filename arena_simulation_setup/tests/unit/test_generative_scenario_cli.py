@@ -204,13 +204,16 @@ def test_a_world_outside_the_source_roots_is_read_through_the_resolvers_but_not_
     from arena_simulation_setup.tree.World import WorldIdentifier
 
     arena = _checkout(tmp_path)
+    cache = tmp_path / "assets"
+    cache.mkdir()
     resolved = Path(WorldIdentifier("hospital_1").resolve_sync().path)
-    done = _run("zones", "hospital_1", ARENA_DIR=str(arena), WORLD_BUCKETS=",")
+    done = _run("zones", "hospital_1", ARENA_DIR=str(arena), WORLD_BUCKETS=",", ARENA_ASSETS_DIR=str(cache))
     assert done.returncode == 0, done.stdout + done.stderr
     assert "transit" in done.stdout
-    done = _run("populate", "hospital_1", "--write", ARENA_DIR=str(arena), WORLD_BUCKETS=",")
+    done = _run("populate", "hospital_1", "--write", ARENA_DIR=str(arena), WORLD_BUCKETS=",", ARENA_ASSETS_DIR=str(cache))
     assert done.returncode == 1
     assert f"resolves to {resolved}, which is no source world root ({arena / 'arena_simulation_setup' / 'worlds'})" in done.stderr
+    assert not any(cache.rglob("*"))
 
 
 def test_writes_into_an_install_prefix_or_the_asset_cache_are_refused(tmp_path: Path) -> None:

@@ -13,6 +13,9 @@ ISAAC_VERSION = "4.2.0"
 
 DESCRIPTION = "NVIDIA Isaac Sim simulator."
 
+BRIDGE_PACKAGES = ("isaacsim_msgs", "arena_people_msgs")
+BRIDGE_DIR = ".isaac_bridge"
+
 _FORMATS_SOURCE = 'case "$ARENA_MODELS_FORMATS" in *usd*) ;; *) export ARENA_MODELS_FORMATS="${ARENA_MODELS_FORMATS},usdz,usd,usda,usdc" ;; esac'
 
 _HOST_SOURCE = f'if [ -z ${{ISAAC_PATH+x}} ] ; then\n    . "$HOME/isaacsim-{ISAAC_VERSION}/setup.sh"\nfi\n{_FORMATS_SOURCE}'
@@ -127,11 +130,59 @@ def launch_host(argv: list[str]) -> None:
     common._exec("ros2", "launch", "arena_isaac", "run_isaacsim.launch.py", *argv)
 
 
+def _build_bridge() -> int:
+    """Build the bridge message packages without symlinks into `install/.isaac_bridge`, which the isaac container mounts."""
+    import subprocess
+
+    from arena_cli import build
+
+    ws = build.workspace()
+    python = build.build_python()
+    print(f"isaac bridge: building {', '.join(BRIDGE_PACKAGES)} into {ws.install_base}/{BRIDGE_DIR}", flush=True)
+    done = subprocess.run(
+        [
+            "colcon",
+            "build",
+            "--base-paths",
+            *ws.base_paths,
+            "--packages-select",
+            *BRIDGE_PACKAGES,
+            "--build-base",
+            os.path.join(ws.build_base, BRIDGE_DIR),
+            "--install-base",
+            os.path.join(ws.install_base, BRIDGE_DIR),
+            *(["--cmake-args", f"-DPython3_EXECUTABLE={python}"] if python else []),
+        ],
+        cwd=common._env("ARENA_WS_DIR"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode:
+        print(done.stdout + done.stderr, file=sys.stderr)
+        print("isaac bridge: building the bridge messages failed, Isaac Sim is not started", file=sys.stderr)
+    return done.returncode
+
+
+def _arena_ros_versions() -> str:
+    """This container's rclpy, rcl and Fast DDS versions as the JSON the isaac side compares against."""
+    import subprocess
+
+    done = subprocess.run([sys.executable, "-m", "arena_isaac.bridge_check", "versions"], capture_output=True, text=True, check=False)
+    if done.returncode:
+        raise CLIError(f"reading the arena ROS versions failed: {done.stderr.strip()}")
+    return done.stdout.strip()
+
+
 def launch_container(argv: list[str]) -> None:
-    """Launch Isaac Sim in its container."""
+    """Launch Isaac Sim in its container, on bridge messages built from this workspace."""
     import signal
 
     common._reg_require(NAME)
+    rc = _build_bridge()
+    if rc:
+        sys.exit(rc)
+    versions = _arena_ros_versions()
     rc = features.compose(["up", "-d", "--remove-orphans", "isaac"])
     if rc:
         sys.exit(rc)
@@ -144,8 +195,9 @@ def launch_container(argv: list[str]) -> None:
                 "isaac",
                 "bash",
                 "-c",
-                'source /opt/arena_ws/install/local_setup.bash && python3-arena /opt/arena_ws/build/arena_isaac/arena_isaac/run_isaacsim.py "$@"',
+                f'source /opt/arena_ws/install/local_setup.bash && source /opt/arena_ws/install/{BRIDGE_DIR}/local_setup.bash && ARENA_ROS_VERSIONS="$1" python3 /opt/arena_ws/build/arena_isaac/arena_isaac/bridge_check.py check && python3 /opt/arena_ws/build/arena_isaac/arena_isaac/run_isaacsim.py "${{@:2}}"',
                 "--",
+                versions,
                 *argv,
             ]
         )

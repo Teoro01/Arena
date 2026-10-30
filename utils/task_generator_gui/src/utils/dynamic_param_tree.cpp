@@ -206,7 +206,10 @@ void DynamicParamTree::buildTreeWidgets(const std::shared_ptr<RebuildState>& sta
         if (retries_ > 0)
         {
             --retries_;
-            QTimer::singleShot(2000, &lifetime_, [this, prefix = state->namespace_prefix]() { retryRebuild(prefix); });
+            QTimer::singleShot(2000, &lifetime_, [this, generation = state->generation, prefix = state->namespace_prefix]()
+            {
+                if (generation == rebuild_gen_) retryRebuild(prefix);
+            });
         }
         return;
     }

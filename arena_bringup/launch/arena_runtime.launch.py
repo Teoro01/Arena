@@ -4,7 +4,7 @@ import launch
 import launch.event_handlers
 import launch_ros.actions
 from arena_bringup.actions import IsolatedGroupAction
-from arena_bringup.defaults import gz_discovery_env
+from arena_bringup.defaults import SIM_ORDER, default_sim, gz_discovery_env
 from arena_bringup.extensions.NodeLogLevelExtension import SetGlobalLogLevelAction
 from arena_bringup.substitutions import LaunchArgument, deprecated_launch_args
 from launch.substitutions import PathJoinSubstitution
@@ -42,7 +42,8 @@ def generate_launch_description():
 
     sim = LaunchArgument(
         name='sim',
-        default_value='gazebo',
+        default_value=default_sim(),
+        description=f'simulator, default: arena settings sim, else the first installed of {", ".join(s.value for s in SIM_ORDER)}, else dummy',
     )
 
     use_sim_time = LaunchArgument(

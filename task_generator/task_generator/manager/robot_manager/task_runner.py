@@ -7,7 +7,7 @@ import typing
 from collections.abc import Sequence
 
 import attrs
-from arena_simulation_setup.shared.conditions import EpisodeCondition, OnFailure, parse_until
+from arena_simulation_setup.shared.conditions import EpisodeCondition, OnFailure, render_until
 from arena_simulation_setup.shared.judge import ConditionMonitor, PhaseMonitor, Sample, UntilMonitor, Zones
 from arena_simulation_setup.shared.task import LoopPhase, TaskPhase
 from arena_simulation_setup.utils.geometry import Orientation, Pose, Position
@@ -110,7 +110,8 @@ class TaskRunner:
         runs: list[LoopRun] = []
         for phase in phases:
             if isinstance(phase, LoopPhase):
-                run = LoopRun(phase=phase, monitor=UntilMonitor(parse_until(phase.until), self.robot) if phase.until is not None else None)
+                until = phase.until_node
+                run = LoopRun(phase=phase, monitor=UntilMonitor(until, self.robot) if until is not None else None)
                 states.extend(self._iteration(run, first + len(states)))
                 run.resume = first + len(states)
                 runs.append(run)
@@ -236,7 +237,7 @@ class TaskRunner:
         transition.violated.append(scoped)
         self.changed = True
         if scoped.condition.on_failure != "continue":
-            self._apply_policy(scoped.condition.on_failure, f"condition {scoped.id} ({scoped.condition.p}) violated on robot {self.robot}", transition)
+            self._apply_policy(scoped.condition.on_failure, f"condition {scoped.id} ({render_until(scoped.condition.p_node)}) violated on robot {self.robot}", transition)
 
     def _apply_policy(self, policy: OnFailure, reason: str, transition: Transition) -> None:
         self.stop()

@@ -323,3 +323,26 @@ def test_standoff_pose_defaults_and_stays_put_when_already_close():
     close = standoff_pose((0.0, 0.0), (0.5, 0.0))
     assert (close.position.x, close.position.y) == pytest.approx((0.0, 0.0))
     assert close.orientation.to_yaw() == pytest.approx(0.0)
+
+
+def drawer_at(t, x, y, openness):
+    return Sample(t=t, robots={"r": (x, y, 0.0)}, field=lambda e, f: None, family=lambda e, f: {"left": openness, "right": "0.0"} if (e, f) == ("drawer", "openness") else None, walls=OPEN_FLOOR)
+
+
+def test_loop_exits_on_a_structured_family_until_after_its_hold():
+    runner = TaskRunner("r")
+    runner.submit([patrol(until={"some": "drawer.openness", "ge": 0.5, "for": 1}), goto(12.0, 1.0)])
+    runner.step(drawer_at(0.0, 5.0, 5.0, "0.9"), ZONES, None, OK)
+    runner.step(drawer_at(0.5, 5.0, 5.0, "0.1"), ZONES, None, OK)
+    runner.step(drawer_at(1.0, 5.0, 5.0, "0.9"), ZONES, None, OK)
+    runner.step(drawer_at(1.9, 5.0, 5.0, "0.9"), ZONES, None, OK)
+    assert runner.active == 0 and runner.outcomes("dropped") == []
+    runner.step(drawer_at(2.0, 5.0, 5.0, "0.9"), ZONES, None, OK)
+    assert runner.outcomes("dropped") == [0, 1] and runner.active == 2
+
+
+def test_violation_reason_names_a_structured_condition_in_text():
+    runner = TaskRunner("r")
+    runner.submit([goto(12.0, 1.0)], conditions=[EpisodeCondition.parse({"op": "never", "p": {"subject": "robot", "in": "hallway"}, "on_failure": "abort_episode"})])
+    transition = runner.step(at(0.0, 11.0, 1.0), ZONES, None, OK)
+    assert transition.abort == "condition r0:0 (robot in hallway) violated on robot r"

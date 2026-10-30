@@ -4,6 +4,7 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
+from arena_cli import bg
 from arena_cli.common import make_verb
 from arena_cli.complete import Flags, Kv, Static, Union
 
@@ -29,7 +30,7 @@ def _discover_envs() -> list[str]:
 
 def _matches(ns: str, target: str) -> bool:
     env_ns = os.path.dirname(ns)
-    return target in (ns, env_ns, env_ns.lstrip("/")) or os.path.basename(env_ns) == target
+    return target in (ns, env_ns, env_ns.lstrip("/")) or os.path.basename(env_ns) == (f"env_{target}" if target.isdigit() else target)
 
 
 def _wait_for_env(target: str | None) -> list[str]:
@@ -158,6 +159,7 @@ def cmd(argv: list[str]) -> None:
       viz <env_id>       attach to the env whose namespace equals or basename-matches <env_id>
       viz --ns <ns>      explicit form of the above
       viz --all          attach to every running env, shut down all on Ctrl-C
+      viz --bg ...       any of the above, detached with output to a log file, stopped by closing the window or `arena runtime down`
 
     Any <key>:=<value> token is forwarded to the backend's launch file. A `viz.`
     prefix is accepted (so tokens shared with `arena launch` work unchanged) but
@@ -180,7 +182,15 @@ def cmd(argv: list[str]) -> None:
     Polls `ros2 topic list` for `<ns>/state/viz_manifest` topics to discover envs,
     waiting forever (10s heartbeat) until a match appears.
     """
-    sys.exit(_main(list(argv)))
+    detached, rest = bg.take_flag(list(argv))
+    if detached:
+        pid, log = bg.detach([sys.executable, "-m", "arena_cli", "viz", *rest], "arena_viz", bg.log_dir())
+        bg.record(bg.state_dir(), "viz", pid, rest, log)
+        print(f"arena viz: running in the background (pid {pid})")
+        print(f"  log:  tail -f {log}")
+        print("  stop: close the window, or arena runtime down")
+        sys.exit(0)
+    sys.exit(_main(rest))
 
 
 VIZ_KV = Kv(
@@ -193,4 +203,4 @@ VIZ_KV = Kv(
     }
 )
 
-VERB = make_verb("viz", cmd, passthrough=True, complete=Union(Flags({"--all": "attach to every running env", "--ns": "explicit env namespace"}, valued=("--ns",)), VIZ_KV))
+VERB = make_verb("viz", cmd, passthrough=True, complete=Union(Flags({"--all": "attach to every running env", "--ns": "explicit env namespace", bg.FLAG: "run detached, output to a log file"}, valued=("--ns",)), VIZ_KV))

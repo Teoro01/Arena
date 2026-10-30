@@ -101,7 +101,10 @@ share one definition. [`request.py`](request.py) re-exports them with
   (`continue` | `stop_task` | `abort_episode`), `until` (clauses joined by
   ` or `, each atoms of the `conditions:` grammar joined by ` and ` with an
   optional ` for <seconds>` dwell; the phase completes once any clause has
-  held, its atoms together, for its dwell, counted from arrival for a goto),
+  held, its atoms together, for its dwell, counted from arrival for a goto,
+  or a structured condition node with `for:` holds, numeric comparisons and
+  `some`/`each` over a field family, see
+  [worlds/README.md](../../../../arena_simulation_setup/worlds/README.md)),
   `conditions` (clauses judged over the phase only)
   and `text` (an authored instruction overriding the rendered one).
 - `LoopPhase(phases, until?)`: the phases repeated in order; the `until` is

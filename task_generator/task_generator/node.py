@@ -35,11 +35,12 @@ from arena_rclpy_mixins.shared import Namespace
 from arena_rclpy_mixins.Time import Time
 from arena_robots.Sensor import SensorType
 from arena_runtime.sim import BaseSim, SimulatorRegistry
-from arena_simulation_setup.shared.conditions import parse_atom
-from arena_simulation_setup.shared.judge import Sample, WallGrid, atom_holds, zone_polygons
+from arena_simulation_setup.shared.conditions import Node
+from arena_simulation_setup.shared.judge import NodeMonitor, Sample, WallGrid, zone_polygons
 from arena_simulation_setup.shared.task import GoToPhase, LoopPhase, TaskPhase, TaskRequest
 from arena_simulation_setup.tree.World import Level
 from arena_simulation_setup.tree.World.Scenario import EpisodeCondition, TimelineEntry
+from arena_simulation_setup.utils.articulation import family_members
 from arena_viz.kinds import DisplayKind
 from arena_viz.style import StyleSpec
 from rcl_interfaces.msg import IntegerRange, ParameterDescriptor, ParameterValue
@@ -110,6 +111,8 @@ class _TimelineState(typing.TypedDict):
     next: float
     prev: bool
     rng: random.Random
+    when: Node | None
+    monitors: dict[str, NodeMonitor]
 
 
 @attrs.define
@@ -803,7 +806,7 @@ class TaskGenerator(ArenaMixinNode, SafeCallbackNode, rclpy.lifecycle.LifecycleN
         prefix = f"{self._realizer.prefix()}/"
         for change in changes:
             kind = _SEMANTIC_KINDS.get(change.kind)
-            if change.field_kind == "state" and (change.field in kind.CONTINUOUS if kind is not None else self._is_number(change.current)):
+            if change.field_kind == "state" and (kind.is_continuous(change.field) if kind is not None else self._is_number(change.current)):
                 continue
             entity = authored.get(change.entity) or human.authored_name(change.entity)
             value = change.current.removeprefix(prefix)
@@ -932,6 +935,19 @@ class TaskGenerator(ArenaMixinNode, SafeCallbackNode, rclpy.lifecycle.LifecycleN
             return zone_value
         return self._robot_field_value(realized, field)
 
+    def _semantic_family(self, entity: str, family: str) -> dict[str, str] | None:
+        """Current stringified value of each `<family>.<member>` field of one entity by member, None without a snapshot of the entity."""
+        realized = self._resolve_semantic_entity(entity)
+        assert self._simulator is not None
+        members: dict[str, str] | None = None
+        for snap in self._simulator.semantics_snapshot():
+            if snap.entity != realized:
+                continue
+            members = members or {}
+            members.update(family_members(snap.discrete, family))
+            members.update({member: self._stringify_float(value) for member, value in family_members(snap.continuous, family).items()})
+        return members
+
     def register_sound_levels(self, levels: dict[str, float]) -> None:
         """Asset level of each episode sound, read as its volume_db while its semantics carry none."""
         self._sound_levels = dict(levels)
@@ -950,7 +966,7 @@ class TaskGenerator(ArenaMixinNode, SafeCallbackNode, rclpy.lifecycle.LifecycleN
             else:
                 nxt = float("inf")
             self._timeline_state.append(
-                {"fired": False, "next": nxt, "prev": False, "rng": random.Random(f"{seed}:{idx}")},
+                {"fired": False, "next": nxt, "prev": False, "rng": random.Random(f"{seed}:{idx}"), "when": entry.when_node(), "monitors": {}},
             )
 
     def reset_timeline(self) -> None:
@@ -989,13 +1005,13 @@ class TaskGenerator(ArenaMixinNode, SafeCallbackNode, rclpy.lifecycle.LifecycleN
             return str(rng.uniform(lo_f, hi_f))
         return raw
 
-    def _when_true(self, when: dict | str) -> bool:
-        if isinstance(when, str):
-            atom = parse_atom(when)
-            return any(atom_holds(atom, self._sample, self._judge_zones, robot) is True for robot in self._sample.robots or ("robot",))
-        expected = self._norm_token(when.get("is"))
-        current = self._semantic_value(str(when.get("entity", "")), str(when.get("field", "")))
-        return current is not None and current == expected
+    def _when_true(self, node: Node, monitors: dict[str, NodeMonitor]) -> bool:
+        """Whether a `when` trigger holds for some robot of the env."""
+        holds = False
+        for robot in self._sample.robots or ("robot",):
+            monitor = monitors.setdefault(robot, NodeMonitor(node, robot))
+            holds = monitor.step(self._sample, self._judge_zones) is True or holds
+        return holds
 
     def _fire_timeline_entry(self, idx: int, entry: "TimelineEntry") -> None:
         for action in entry.set:
@@ -1058,8 +1074,8 @@ class TaskGenerator(ArenaMixinNode, SafeCallbackNode, rclpy.lifecycle.LifecycleN
                     fired = True
                     while state["next"] <= rel:
                         state["next"] += entry.every
-            elif entry.when is not None:
-                current = self._when_true(entry.when)
+            elif (when := state["when"]) is not None:
+                current = self._when_true(when, state["monitors"])
                 if current and not state["prev"]:
                     fired = True
                 state["prev"] = current
@@ -1104,7 +1120,7 @@ class TaskGenerator(ArenaMixinNode, SafeCallbackNode, rclpy.lifecycle.LifecycleN
         clips = {self._human_simulator.authored_name(name): playing for name, playing in self._human_simulator.pedestrian_clips().items()}
         self._known_subjects.update(peds)
         self._known_subjects.update(robots)
-        return Sample(t=self.sim_time.to_seconds(), robots=robots, peds=peds, field=self._semantic_value, known=frozenset(self._known_subjects), clips=clips, walls=self._judge_walls)
+        return Sample(t=self.sim_time.to_seconds(), robots=robots, peds=peds, field=self._semantic_value, known=frozenset(self._known_subjects), clips=clips, walls=self._judge_walls, family=self._semantic_family)
 
     def _wall_grid(self, compacted: Level) -> WallGrid:
         """The loaded world's walls rasterized the way the replay judge rasterizes them."""

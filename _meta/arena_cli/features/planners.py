@@ -402,7 +402,7 @@ def install(argv: list[str]) -> None:
 def test(argv: list[str]) -> None:
     """Lockstep soak of planners via the benchmark runner.
 
-    `arena planners test [--preflight] [--lanes N] <name...|--all> [sim:=gazebo] [KEY:=VALUE ...]`
+    `arena planners test [--preflight] [--lanes N] <name...|--all> [sim:=...] [KEY:=VALUE ...]`
     Soak: one crowded lockstep stage per planner, stall/rtf/beat table, exit 3 on a stall, 4 when the runner hung.
     `--preflight`: two episodes of map_empty's `preflight` scenario, verdict wedged/weak/ok per planner, exit 3 on either.
     `--all`: every initialized planner. `--lanes N`: spread the planners over N lanes, each in its own fork.

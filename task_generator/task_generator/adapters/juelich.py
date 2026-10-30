@@ -25,15 +25,17 @@ ARCHIVE = "https://ped.fz-juelich.de/da/doku.php?id=start"
 LICENSE = "CC-BY-4.0"
 METRES = "[in m]"
 CM_PER_M = 100.0
+PASSAGE_M = 18.0
 
 
 @attrs.frozen
 class Set:
-    """One experiment set of the archive: its data directory, the file prefix of its metadata and trajectory archive, and the frame rate of its frame numbers."""
+    """One experiment set of the archive: its data directory, the file prefix of its metadata and trajectory archive, the frame rate of its frame numbers, and for a bottleneck set the width of the passage its bars close."""
 
     directory: str
     prefix: str
     fps: float
+    passage: float | None = None
 
     @property
     def metadata(self) -> str:
@@ -50,7 +52,7 @@ _HERMES = "2009.05.12_Duesseldorf_Messe_Hermes/data/zip"
 SETS = {
     "basigo_bidirectional": Set(f"{_BASIGO}/2013bidirectional", "2013bidirectional", 25.0),
     "basigo_crossing_90": Set(f"{_BASIGO}/2013crossing_90", "2013crossing_90", 16.0),
-    **{f"hermes_{name}": Set(_HERMES, f"2009{name}", 16.0) for name in ("unidirectional_open", "unidirectional_closed", "bidirectional_free", "bidirectional_symmetric", "bidirectional_asymmetric", "bottleneck", "tjunction")},
+    **{f"hermes_{name}": Set(_HERMES, f"2009{name}", 16.0, PASSAGE_M if name == "bottleneck" else None) for name in ("unidirectional_open", "unidirectional_closed", "bidirectional_free", "bidirectional_symmetric", "bidirectional_asymmetric", "bottleneck", "tjunction")},
 }
 
 
@@ -74,6 +76,19 @@ def layout_index(metadata: dict, run: str) -> int:
 
 def world_name(name: str, index: int) -> str:
     return f"juelich_{name}_{index}"
+
+
+def bottleneck(wkt: str, passage: float) -> str:
+    """A bottleneck layout with its two bars run out to the side walls of a passage this wide, centered on the opening."""
+    layout = shapely.from_wkt(wkt)
+    if not isinstance(layout, shapely.Polygon):
+        raise ValueError(f"a bottleneck layout is one polygon, got a {layout.geom_type}")
+    left, right = sorted((shapely.Polygon(ring) for ring in layout.interiors), key=lambda bar: bar.centroid.x)
+    lo, hi = left.bounds[2], right.bounds[0]
+    a, b = (lo + hi - passage) / 2, (lo + hi + passage) / 2
+    _, y0, _, y1 = layout.exterior.bounds
+    bars = shapely.union(shapely.box(a, left.bounds[1], lo, left.bounds[3]), shapely.box(hi, right.bounds[1], b, right.bounds[3]))
+    return shapely.box(a, y0, b, y1).difference(bars).wkt
 
 
 def floor(wkt: str) -> World:
@@ -129,7 +144,11 @@ class Juelich(Importer):
         metadata = self.metadata(name)
         world = world_name(name, layout_index(metadata, run))
         played = tracks(read_run(run_text(src, run), SETS[name].fps))
-        save_generated(WorldView(out / world), floor(dict(runs(metadata))[run]), scenario_files(run, played))
+        layout = dict(runs(metadata))[run]
+        passage = SETS[name].passage
+        if passage is not None:
+            layout = bottleneck(layout, passage)
+        save_generated(WorldView(out / world), floor(layout), scenario_files(run, played))
         ScenarioView(out / world / "scenarios" / run).load()
         return f"{world}/scenarios/{run}"
 

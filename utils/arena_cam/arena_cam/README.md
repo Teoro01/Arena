@@ -85,7 +85,7 @@ cam.add("establishing", radius=8)
 cam.play()
 ```
 
-All angle arguments are **radians**. fov is radians (0 = keep current).
+All angle arguments are **radians**. fov is the horizontal field of view in radians (0 = keep current).
 `sweep_deg` / `start_deg` are accepted as degree conveniences on verbs that
 support them.
 
@@ -563,6 +563,12 @@ A streamed segment emits `round(duration * fps)` frames, a discrete `look` /
 `reference`, `projection`) none. The first captured frame fixes the video size
 (odd dimensions are padded to even), so keep the viewport size fixed during a
 take: a resize stops the recording at the last good frame.
+
+A failed capture is retried on the same frame, up to 3 attempts. A capture that
+still fails, a resize, a lockstep hold or step that fails, or an ffmpeg error
+stops the take at the last good frame, logs the reason, and makes `arena cam`
+exit 1 (`Camera.record` returns False), so a short or empty file never counts as
+a finished take.
 
 Recording is camera-locked by default: the camera path is deterministic but the
 scene advances at the sim's own rate, so pause the sim first for a fully
