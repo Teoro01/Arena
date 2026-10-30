@@ -123,7 +123,8 @@ Pedestrians ride like robots: the shim counts a ped inside a cabin footprint as 
   `_ElevatorRuntime.current_destination()`: the written `target` if set, else round-robin (one step per
   departure). `capacity` (live occupants) suppresses outside calls when full.
   `call_mode: edge` makes outside calls edge-triggered (newcomer in the call radius, or a shut idle cabin),
-  so agents waiting in the lobby do not hold the door open; `level` (default) re-fires every tick.
+  so agents waiting in the lobby do not hold a boarded car's door open, while an empty car stays open for
+  them instead of closing and reopening. `level` (default) re-fires every tick.
   Door holds are bounded: outside callers keep a loaded car open at most `hold_time` after its first boarder
   entered, an empty car stops answering them once a call elsewhere has waited `hold_time`, and arrivals hold
   the door at most `TELEPORT_GRACE` (10 s sim time) while a call waits, riding along if still inside when

@@ -654,8 +654,8 @@ def _step_elevator(
         if runtime.elevator.call_mode != 'edge':
             call = True
         else:
-            idle_shut = door_runtime.state == _DoorState.CLOSED and runtime.car != _CarState.DEPARTING and not new_occupants
-            call = bool(new_callers) or idle_shut
+            idle = runtime.car != _CarState.DEPARTING and not new_occupants
+            call = bool(new_callers) or (idle and (door_runtime.state == _DoorState.CLOSED or not current))
         if new_occupants and now - runtime.boarded_at > hold_time:
             call = False
         if not new_occupants and yielding:
