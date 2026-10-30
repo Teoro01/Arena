@@ -58,12 +58,12 @@ from task_generator.utils.flags import ObstaclesOptim, obstacles_optim_level
 from viewport_control_msgs.msg import ViewportView
 from viewport_control_msgs.srv import ViewportSetProjection, ViewportSetReferenceFrame, ViewportSetView
 
+from arena_runtime.constants import SimSimulator
 from arena_runtime.sim import BaseSim, SimKwargs, SimLifecycle, SimUnavailable
 from arena_runtime.sim._articulation import ArticulatedObject, command_fields, surface
 from arena_runtime.sim._articulation import JointCommand as ArticulatedCommand
 from arena_runtime.sim._control import (
     effective_control_yaml,
-    odom_relay_node,
     robot_controllers,
     twist_stamper_node,
 )
@@ -137,6 +137,7 @@ class GazeboHost(SimLifecycle):
         self._logger = logger
         self._dt = physics_dt
         self._rtf_boosted = False
+        self._batch_target: Time | None = None
         self._stats: world_stats_pb2.WorldStatistics | None = None
         self._gz_node = gz.transport13.Node()
         self._gz_node.subscribe(world_stats_pb2.WorldStatistics, _WORLD_STATS_TOPIC, self._on_stats)
@@ -221,6 +222,9 @@ class GazeboHost(SimLifecycle):
         # returning to free-run: restore gz's realtime pacing
         if self._rtf_boosted:
             self._rtf_boosted = not await self._set_physics_rtf(1.0)
+        if self._batch_target is not None:
+            await self._await_batches_done(self._batch_target)
+            self._batch_target = None
         async with self._semaphore:
             self._logger.debug("Attempting to unpause simulation")
             request = ControlWorld.Request()
@@ -265,7 +269,7 @@ class GazeboHost(SimLifecycle):
             chunk_target = min(target, start_sim + Time.from_float((chunk - 0.5) * self._dt))
             await self._send_multi_step(chunk, seconds)
             await self._node.await_sim_time(chunk_target, freeze_timeout=1.0)
-        await self._await_batches_done(target)
+        self._batch_target = target
         return n * self._dt
 
     async def _await_batches_done(self, target: Time) -> None:
@@ -400,7 +404,7 @@ class GazeboSimulator(BaseSim):
         return args
 
     def _render_ros2_control_yaml(self, robot: Robot, config_uri: str, *, frame_prefix: str, control_prefix: str) -> str:
-        return effective_control_yaml(robot.resolved_assembly, config_uri, robot.sim_path, frame_prefix, prefix=control_prefix)
+        return effective_control_yaml(robot.resolved_assembly, config_uri, robot.sim_path, frame_prefix, sim=SimSimulator.GAZEBO, prefix=control_prefix)
 
     async def obstacle_spawn(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
         level = obstacles_optim_level(self.node)
@@ -1080,6 +1084,9 @@ class GazeboSimulator(BaseSim):
             )
         )
 
+        control_spec = robot_config.model_params.control
+        is_ros2_control = control_spec is not None and control_spec.is_ros2_control
+        ros2_control_spec = control_spec if is_ros2_control else None
         launch_description.add_action(
             launch_ros.actions.Node(
                 package="pose_to_tf",
@@ -1092,23 +1099,22 @@ class GazeboSimulator(BaseSim):
                         "parent_frame": robot.frame.tf(robot_config.model_params.odom_frame),
                         "child_frame": robot.frame.tf(robot_config.model_params.base_frame),
                         "pose_topic": "pose",
+                        "odom_in_topic": (ros2_control_spec.odom_topic if ros2_control_spec is not None and ros2_control_spec.odom_topic != "odom" else ""),
                     }
                 ],
             )
         )
 
-        control_spec = robot_config.model_params.control
-        if control_spec is not None and control_spec.is_ros2_control:
-            if not control_spec.controllers:
+        if is_ros2_control:
+            assert ros2_control_spec is not None
+            if not ros2_control_spec.controllers:
                 raise ValueError(f"control.mode=ros2_control but no controllers declared for {robot.name}")
             launch_description.add_action(
                 twist_stamper_node(
-                    control_spec.cmd_vel_topic,
+                    ros2_control_spec.cmd_vel_topic,
                     robot.frame.tf(robot_config.model_params.base_frame),
                 )
             )
-            if control_spec.odom_topic != "odom":
-                launch_description.add_action(odom_relay_node(control_spec.odom_topic))
 
         launch_description.add_action(
             launch_ros.actions.Node(

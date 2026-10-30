@@ -1,0 +1,15 @@
+name: hospital_bed
+mode: behavior_tree
+extends: adult
+desired_velocity: {mean: 1.0, std: 0.0, clip_low: 0.5, clip_high: 1.5}
+
+initial_sequence: rest
+
+sequences:
+  rest:
+    steps:
+      rest_on:
+        target: gallery_hospital_bed
+        interaction: LIE_ON
+        duration: {mean: 100000.0, std: 0.0}
+    then: rest

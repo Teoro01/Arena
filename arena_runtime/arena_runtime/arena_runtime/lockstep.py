@@ -31,6 +31,8 @@ _LOCKSTEP_REASON = "lockstep"
 _STATUS_PERIOD = 1.0
 _STALL_AFTER = 1.0
 _CLOCK_NUDGE_S = 0.5
+_STEP_RETRIES = 5
+_STEP_BACKOFF_S = 1.0
 
 _CLOCK_QOS = rclpy.qos.QoSProfile(
     depth=1,
@@ -273,6 +275,7 @@ class LockstepScheduler:
         loop = asyncio.get_running_loop()
         window_start = loop.time()
         window_advance = 0.0
+        failures = 0
         try:
             while True:
                 iter_start = loop.time()
@@ -300,12 +303,21 @@ class LockstepScheduler:
                 pace = config.target_rtf
                 if not config.ungated and not ledger.channels and pace <= 0.0:
                     pace = 1.0
-                if config.ungated or not ledger.channels:
-                    ledger.advance(await self._node._lifecycle.step_seconds(step_slice(pace, dt)))
-                    self._node._lifecycle.record_success()
-                else:
-                    ledger.advance(await self._node._lifecycle.step_seconds(ledger.next_delta()))
-                    self._node._lifecycle.record_success()
+                gated = not config.ungated and bool(ledger.channels)
+                try:
+                    advanced = await self._node._lifecycle.step_seconds(ledger.next_delta() if gated else step_slice(pace, dt))
+                except RuntimeError as e:
+                    failures += 1
+                    if failures > _STEP_RETRIES:
+                        raise
+                    backoff = _STEP_BACKOFF_S * 2 ** (failures - 1)
+                    self._node.get_logger().warning(f"lockstep: step failed ({e}), retry {failures}/{_STEP_RETRIES} in {backoff:.0f}s")
+                    await asyncio.sleep(backoff)
+                    continue
+                failures = 0
+                ledger.advance(advanced)
+                self._node._lifecycle.record_success()
+                if gated:
                     due = ledger.due()
                     hard_due = [ch for ch in due if ch.hard]
                     if hard_due:

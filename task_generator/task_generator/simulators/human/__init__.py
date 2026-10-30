@@ -11,6 +11,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 import attrs
+import numpy as np
 import rclpy.node
 import rclpy.publisher
 import rclpy.qos
@@ -29,6 +30,7 @@ from arena_runtime.sim import BaseSim
 from arena_runtime_msgs.msg import LockstepChannel
 from arena_simulation_setup.tree.assets.Human import HumanIdentifier
 from arena_simulation_setup.utils.models import ModelType
+from geometry_msgs.msg import Point as PointMsg
 from geometry_msgs.msg import Pose as PoseMsg
 from geometry_msgs.msg import Quaternion as QuaternionMsg
 from rcl_interfaces.msg import Parameter as ParameterMsg
@@ -43,6 +45,7 @@ from task_generator.simulators.human.gestures import Channel, GestureLayer, Gest
 from task_generator.simulators.human.itinerary import semantic_atom
 from task_generator.simulators.human.possession import PossessionTable
 from task_generator.simulators.human.profile import PoseProfile, agent_type_pose_section, default_profile, resolve_pose_profile
+from task_generator.simulators.human.support import LIE_S, SETTLE_S, SIT_CLIP, SQUAT_CLIP, TYPICAL_BODY, BodyMeasurements, SeatPlan, Support, blend_pose, load_body, plan_seat, rise_seconds, seat_depth, supported_pose
 from task_generator.simulators.human.utils import (
     KnownObstacle,
     KnownObstacles,
@@ -111,6 +114,20 @@ class HumanSimulatorOptions(typing.TypedDict):
     realizer: Realizer
     acoustics: BaseAcousticsSimulator
     robots_visible: typing.NotRequired[bool]
+
+
+@attrs.define
+class _Rest:
+    """A ped on furniture or rising from it: where it rests, since when, and the poses its body blends from and to."""
+
+    support: Support
+    x: float
+    y: float
+    yaw: float
+    since: float
+    start: tuple[np.ndarray, np.ndarray]
+    released: float | None = None
+    end: tuple[np.ndarray, np.ndarray] | None = None
 
 
 class BaseHumanSimulator(NodeInterface, abc.ABC):
@@ -193,6 +210,11 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
         self._pose_profiles: dict[str, PoseProfile] = {}
         self._driven = DrivenJoints()
         self._drivers: dict[str, tuple[Roller, ...]] = {}
+        self._bodies: dict[str, BodyMeasurements] = {}
+        self._seat_plans: dict[int, SeatPlan] = {}
+        self._rests: dict[int, _Rest] = {}
+        self._free_poses: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._warned_no_squat = False
         self._gestures = GestureLayer(self._gait, self._logger)
         self._gait.gesture_hook = self._gestures
         self.node.create_subscription(
@@ -250,6 +272,9 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
         for stale in sorted(set(self._gait_prev_stamp) - current_ids):
             self._gestures.forget(stale)
             self._gait.forget(stale)
+            self._seat_plans.pop(stale, None)
+            self._rests.pop(stale, None)
+            self._free_poses.pop(stale, None)
             del self._gait_prev_stamp[stale]
         for stale in sorted(self._driven.known() - current_ids):
             self._driven.forget(stale)
@@ -268,8 +293,10 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
             self._gait_prev_stamp[ped.id] = now_sec
             yaw = Orientation.from_msg(ped.pose.orientation).to_yaw()
             speed = ped.twist.linear.x * math.cos(yaw) + ped.twist.linear.y * math.sin(yaw)
+            support = self._support(ped)
+            channels = [g for g in ped.gestures if g.clip != SIT_CLIP or (support is not None and support.kind == "sit")]
             gesture = GestureRequest(
-                channels=tuple(Channel(slot=g.slot, at=(g.at.x, g.at.y, g.at.z), clip=g.clip, hand=g.hand, lock=g.render_pose_override) for g in ped.gestures),
+                channels=tuple(Channel(slot=g.slot, at=(g.at.x, g.at.y, g.at.z), clip=self._seat_clip(ped, support) if g.clip == SIT_CLIP and support is not None else g.clip, hand=g.hand, lock=g.render_pose_override) for g in channels),
                 pose=(ped.pose.position.x, ped.pose.position.y, yaw),
                 moving=ped.animation_state in (Pedestrian.WALKING, Pedestrian.RUNNING),
             )
@@ -286,6 +313,13 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
             yaw = Orientation.from_msg(ped.pose.orientation).to_yaw()
             angles = self._driven.advance(ped.id, drivers, ped.pose.position.x, ped.pose.position.y, yaw)
             ped.joint_state.name, ped.joint_state.position = with_driven(ped.joint_state.name, ped.joint_state.position, angles)
+
+        possessed = self._possession.possessed(now_sec)
+        for ped in out.pedestrians:
+            if ped.name in possessed:
+                self._rests.pop(ped.id, None)
+                continue
+            self._place_resting(ped, now_sec)
 
         self._arena_peds_publisher.publish(out)
         self._animation_states_publisher.publish(animation)
@@ -314,6 +348,82 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
                 ),
             )
         return state
+
+    def _support(self, ped: Pedestrian) -> Support | None:
+        """Seat or bed the ped rests on, None while it is on its feet."""
+        return None
+
+    def _seat_clip(self, ped: Pedestrian, seat: Support) -> str:
+        """The ped's sit-down onto its seat (`plan_seat`), its rise as the release, the sit clip without a squat clip."""
+        squat = self._gait.clip(SQUAT_CLIP)
+        if squat is None:
+            if not self._warned_no_squat:
+                self._warned_no_squat = True
+                self._logger.warning(f"no {SQUAT_CLIP!r} clip, sitters play {SIT_CLIP!r} at any seat height")
+            return SIT_CLIP
+        name = f"seat:{ped.id}:{seat.height:.3f}:{seat.front}:{seat.back}"
+        if name not in self._gait.animations:
+            plan = plan_seat(squat.frames, self._body_for(ped.model_uri), seat.height, seat.front, seat.back, squat.fps)
+            self._gait.register_transient(name, plan.frames, fps=squat.fps, owner=ped.id, release=plan.release)
+            self._seat_plans[ped.id] = plan
+        return name
+
+    def _place_resting(self, ped: Pedestrian, now: float) -> None:
+        """Set a ped on its furniture, its body blending in from where it stood and, once it has risen, out to where it walks on."""
+        p, o = ped.pose.position, ped.pose.orientation
+        free = (np.array([p.x, p.y, p.z]), np.array([o.x, o.y, o.z, o.w]))
+        support = self._support(ped)
+        rest = self._rests.get(ped.id)
+        if support is not None:
+            yaw = Orientation.from_msg(o).to_yaw()
+            if rest is None or rest.released is not None:
+                start = rest.end if rest is not None and rest.end is not None else self._free_poses.get(ped.id, free)
+                rest = self._rests[ped.id] = _Rest(support=support, x=p.x, y=p.y, yaw=yaw, since=now, start=start)
+            else:
+                rest.support, rest.x, rest.y, rest.yaw = support, p.x, p.y, yaw
+            plan = self._seat_plans.get(ped.id)
+            settle = LIE_S if rest.support.kind == "lie" else max(SETTLE_S, plan.down) if plan is not None else SETTLE_S
+            pose = blend_pose(rest.start, self._rest_pose(ped, rest), (now - rest.since) / settle)
+        elif rest is not None:
+            if rest.released is None:
+                rest.released = now
+            plan = self._seat_plans.get(ped.id)
+            hold, settle = (0.0, LIE_S) if rest.support.kind == "lie" else (rise_seconds(plan) if plan is not None else SETTLE_S, SETTLE_S)
+            if now - rest.released < hold or rest.end is None:
+                pose = rest.end = self._rest_pose(ped, rest)
+            elif now - rest.released < hold + settle:
+                pose = blend_pose(rest.end, free, (now - rest.released - hold) / settle)
+            else:
+                del self._rests[ped.id]
+                self._free_poses[ped.id] = free
+                return
+        else:
+            self._free_poses[ped.id] = free
+            return
+        (x, y, z), (qx, qy, qz, qw) = pose
+        ped.pose = PoseMsg(position=PointMsg(x=float(x), y=float(y), z=float(z)), orientation=QuaternionMsg(x=float(qx), y=float(qy), z=float(qz), w=float(qw)))
+
+    def _rest_pose(self, ped: Pedestrian, rest: _Rest) -> tuple[np.ndarray, np.ndarray]:
+        angles = dict(zip(ped.joint_state.name, ped.joint_state.position, strict=True))
+        body = self._body_for(ped.model_uri)
+        plan = self._seat_plans.get(ped.id)
+        depth = seat_depth(plan, angles, body.legs) if rest.support.kind == "sit" and plan is not None else 0.0
+        return supported_pose(rest.support, body, angles, rest.x, rest.y, rest.yaw, depth)
+
+    def _body_for(self, model_uri: str) -> BodyMeasurements:
+        """Measurements of a ped model, read once per model, typical ones when neither its annotation nor its skin gives them."""
+        body = self._bodies.get(model_uri)
+        if body is None:
+            try:
+                body = load_body(model_uri)
+            except (KeyError, TypeError, ValueError, OSError, yaml.YAMLError) as e:
+                self._logger.warning(f"body measurements of {model_uri!r} rejected ({e})")
+                body = None
+            if body is None:
+                self._logger.warning(f"{model_uri!r} has no body measurements and no skin to measure: seated and lying bodies use typical ones")
+                body = TYPICAL_BODY
+            self._bodies[model_uri] = body
+        return body
 
     def _drivers_for(self, model_uri: str) -> tuple[Roller, ...]:
         """Drivers of a ped model's rig.yaml, read once per model, none when the file is rejected."""

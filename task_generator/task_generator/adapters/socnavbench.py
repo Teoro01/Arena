@@ -18,7 +18,7 @@ from arena_simulation_setup.tree.World.Scenario import ScenarioView
 
 from arena_assets.importers import ATTRIBUTION_FILE, IMPORTERS, Attribution, Importer, import_root, write_attribution
 from arena_assets.importers.providers import Http, Provider
-from task_generator.adapters.eth_ucy import ETH, REPO, REVISION, SEQUENCES, UCY, Sequence, parse_sequence, read_rows, scenario_files, scene_items, tracks, walked_world
+from task_generator.adapters.eth_ucy import ETH, REPO, REVISION, SEQUENCES, UCY, Sequence, parse_sequence, pose_in_meters, read_rows, scenario_files, scene_items, tracks, walked_world
 
 BASE_URL = f"https://raw.githubusercontent.com/{REPO}/{REVISION}"
 EPISODES_FILE = "params/episode_params_val.ini"
@@ -183,9 +183,9 @@ def window(track: Track, start: float, end: float) -> Track:
 
 
 def scene_pose(placement: Placement, sequence: Sequence, pose: tuple[float, float, float]) -> tuple[float, float, float]:
-    """A map pose in the frame of the scene's world."""
+    """A map pose in the frame of the scene's world, in meters."""
     x, y, yaw = placement.from_map(pose)
-    return x + sequence.shift[0], y + sequence.shift[1], yaw
+    return pose_in_meters(sequence.to_meters, (x + sequence.shift[0], y + sequence.shift[1], yaw))
 
 
 def world_name(scene: str) -> str:
@@ -244,7 +244,7 @@ class SocNavBench(Importer):
         episode, placement, sequence = self.episode(item), self.placement(item), self.sequence(item)
         own = recorded(placement)
         assert own is not None
-        bodies = {other: parse_sequence(src / DATASETS / SEQUENCES[other].file, SEQUENCES[other].fps, SEQUENCES[other].shift) for other in scene_items(sequence.scene)}
+        bodies = {other: parse_sequence(src / DATASETS / SEQUENCES[other].file, SEQUENCES[other].fps, SEQUENCES[other].shift, SEQUENCES[other].to_meters) for other in scene_items(sequence.scene)}
         frames, idents, _, _ = read_rows(src / DATASETS / sequence.file)
         start_frame, chosen = select(frames.astype(int), idents.astype(int), episode.ped_ranges[0], placement.fps, episode.max_time)
         start = (start_frame - float(frames.min())) / sequence.fps

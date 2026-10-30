@@ -37,9 +37,10 @@ arena feature hearing install # optional: robot hearing (robot.hearing)
 arena feature vllm install # optional: local LLM backend
 arena feature docker gpu on # optional: NVIDIA GPU passthrough, needed for training
 arena settings net lan # optional: let ROS 2 traffic leave this host
+arena settings sim # optional: shows or sets the simulator a launch without sim:= uses
 ```
 
-We recommend installing at least one simulator.
+We recommend installing at least one simulator. A launch without `sim:=` uses `arena settings sim`, by default the first installed simulator in `SIM_ORDER` ([defaults.py](arena_bringup/arena_bringup/defaults.py)), or `dummy` when none is installed.
 
 GPU passthrough takes effect on the next `source arena`, which recreates the container.
 

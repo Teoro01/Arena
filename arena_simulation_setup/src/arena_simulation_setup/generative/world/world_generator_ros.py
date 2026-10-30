@@ -16,7 +16,7 @@ from arena_simulation_setup.tree.World.Map import preview_resolution
 
 from . import alphabet
 from .layout import diagnostics_of
-from .schema import declare_config_params
+from .schema import config_from_params, declare_config_params
 from .world_generator import WorldGenerator, WorldGeneratorType, save_generated
 
 
@@ -26,7 +26,7 @@ class WorldGeneratorROS(WorldGenerator, ROSParamServer, ServiceNamespace):
         seed = self.get_parameter('seed').get_parameter_value().integer_value
         prefix = f'algorithm.{name.value}'
         raw = typing.cast('dict[str, rclpy.parameter.Parameter]', self.get_parameters_by_prefix(prefix))
-        config = {leaf: param.value for leaf, param in raw.items()}
+        config = config_from_params(WorldGenerator.config_model(name), {leaf: param.value for leaf, param in raw.items()})
 
         self.get_logger().info(f'world generator: "{name}"')
         self.get_logger().info(f'config: {config}')
@@ -64,7 +64,7 @@ class WorldGeneratorROS(WorldGenerator, ROSParamServer, ServiceNamespace):
             if request.sketch:
                 config['sketch'] = request.sketch
 
-            self.update_generator(name, config, seed)
+            self.update_generator(name, config_from_params(WorldGenerator.config_model(name), config), seed)
             world = self.compute()
             level = world.all_levels[0]
             diagnostics = diagnostics_of(level)

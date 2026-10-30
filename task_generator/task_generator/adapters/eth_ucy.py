@@ -1,4 +1,4 @@
-"""ETH and UCY pedestrian sequences (SocNavBench's interpolated copies) as replay scenarios, in a world per scene whose floor is the area its pedestrians walked."""
+"""ETH and UCY pedestrian sequences (SocNavBench's interpolated copies, taken to meters) as replay scenarios, in a world per scene whose floor is the area its pedestrians walked."""
 
 from __future__ import annotations
 
@@ -44,11 +44,15 @@ STRAIGHTEN_M = 0.15
 ETH = "Pellegrini, Ess, Schindler, Van Gool, You'll Never Walk Alone: Modeling Social Behavior for Multi-target Tracking, ICCV 2009"
 UCY = "Lerner, Chrysanthou, Lischinski, Crowds by Example, Computer Graphics Forum 26(3), 2007"
 SOCNAVBENCH = "Biswas, Wang, Silvera, Steinfeld, Admoni, SocNavBench: A Grounded Simulation Testing Framework for Evaluating Social Navigation, ACM THRI 2022"
+HEADING_STEP_M = 0.01
+IDENTITY = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+ZARA_TO_METERS = ((0.812165, -0.059712, -0.306607), (-0.002471, 1.100006, 0.234899), (0.0, 0.0, 1.0))
+UNIV_TO_METERS = ((0.85133456, 0.00956132, -0.03623186), (-0.02325422, 1.18850156, 0.58432411), (-0.00399952, 0.0403086, 1.0))
 
 
 @attrs.frozen
 class Sequence:
-    """One recorded sequence: its scene, file, the video frame rate its frame numbers count and the shift of its frame into the scene's."""
+    """One recorded sequence: its scene, file, the video frame rate its frame numbers count, the shift of its frame into the scene's and the homography taking the scene's frame to meters."""
 
     scene: str
     file: str
@@ -56,6 +60,7 @@ class Sequence:
     authors: str
     citation: str
     shift: tuple[float, float] = (0.0, 0.0)
+    to_meters: tuple[tuple[float, float, float], ...] = IDENTITY
 
     @property
     def world(self) -> str:
@@ -68,9 +73,9 @@ _UCY_AUTHORS = "Alon Lerner, Yiorgos Chrysanthou, Dani Lischinski (University of
 SEQUENCES = {
     "eth": Sequence("eth", "eth/world_coordinate_inter_eth.csv", 15.0, _ETH_AUTHORS, f"{ETH}. {SOCNAVBENCH}"),
     "hotel": Sequence("hotel", "hotel/world_coordinate_inter_hotel.csv", 25.0, _ETH_AUTHORS, f"{ETH}. {SOCNAVBENCH}"),
-    "univ": Sequence("univ", "univ/world_coordinate_inter.csv", 25.0, _UCY_AUTHORS, f"{UCY}. {SOCNAVBENCH}"),
-    "zara01": Sequence("zara", "zara01/world_coordinate_inter.csv", 25.0, _UCY_AUTHORS, f"{UCY}. {SOCNAVBENCH}"),
-    "zara02": Sequence("zara", "zara02/world_coordinate_inter.csv", 25.0, _UCY_AUTHORS, f"{UCY}. {SOCNAVBENCH}", shift=(0.0, 1.15)),
+    "univ": Sequence("univ", "univ/world_coordinate_inter.csv", 25.0, _UCY_AUTHORS, f"{UCY}. {SOCNAVBENCH}", to_meters=UNIV_TO_METERS),
+    "zara01": Sequence("zara", "zara01/world_coordinate_inter.csv", 25.0, _UCY_AUTHORS, f"{UCY}. {SOCNAVBENCH}", to_meters=ZARA_TO_METERS),
+    "zara02": Sequence("zara", "zara02/world_coordinate_inter.csv", 25.0, _UCY_AUTHORS, f"{UCY}. {SOCNAVBENCH}", shift=(0.0, 1.15), to_meters=ZARA_TO_METERS),
 }
 
 
@@ -256,10 +261,24 @@ def people(ident: np.ndarray, t: np.ndarray, x: np.ndarray, y: np.ndarray) -> li
     return bodies
 
 
-def parse_sequence(path: Path, fps: float, shift: tuple[float, float] = (0.0, 0.0)) -> list[Body]:
-    """Every pedestrian of a transposed frame, id, y, x file, timed in seconds from the sequence's first frame and moved by *shift*."""
+def in_meters(to_meters: tuple[tuple[float, float, float], ...], x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Points of a scene frame taken to meters through its homography."""
+    h = np.array(to_meters) @ np.vstack([x, y, np.ones_like(x)])
+    return h[0] / h[2], h[1] / h[2]
+
+
+def pose_in_meters(to_meters: tuple[tuple[float, float, float], ...], pose: tuple[float, float, float]) -> tuple[float, float, float]:
+    """A scene-frame pose taken to meters, its heading carried by the map over HEADING_STEP_M."""
+    x, y, yaw = pose
+    mx, my = in_meters(to_meters, np.array([x, x + HEADING_STEP_M * math.cos(yaw)]), np.array([y, y + HEADING_STEP_M * math.sin(yaw)]))
+    return float(mx[0]), float(my[0]), math.atan2(float(my[1] - my[0]), float(mx[1] - mx[0]))
+
+
+def parse_sequence(path: Path, fps: float, shift: tuple[float, float] = (0.0, 0.0), to_meters: tuple[tuple[float, float, float], ...] = IDENTITY) -> list[Body]:
+    """Every pedestrian of a transposed frame, id, y, x file, timed in seconds from the sequence's first frame, moved by *shift* and taken to meters by *to_meters*."""
     frame, ident, y, x = read_rows(path)
-    return people(ident, (frame - frame.min()) / fps, x + shift[0], y + shift[1])
+    mx, my = in_meters(to_meters, x + shift[0], y + shift[1])
+    return people(ident, (frame - frame.min()) / fps, mx, my)
 
 
 def open_floor(points: np.ndarray, margin: float) -> World:
@@ -323,9 +342,9 @@ class ETHUCY(Importer):
 
     def convert(self, item: str, src: Path, out: Path) -> str:
         wanted = sequence(item)
-        scene = [body for other in scene_items(wanted.scene) for body in parse_sequence(src.parents[1] / SEQUENCES[other].file, SEQUENCES[other].fps, SEQUENCES[other].shift)]
+        scene = [body for other in scene_items(wanted.scene) for body in parse_sequence(src.parents[1] / SEQUENCES[other].file, SEQUENCES[other].fps, SEQUENCES[other].shift, SEQUENCES[other].to_meters)]
         target = out / wanted.world
-        save_generated(WorldView(target), walked_world(scene), scenario_files(item, tracks(parse_sequence(src, wanted.fps, wanted.shift))))
+        save_generated(WorldView(target), walked_world(scene), scenario_files(item, tracks(parse_sequence(src, wanted.fps, wanted.shift, wanted.to_meters))))
         ScenarioView(target / "scenarios" / item).load()
         return f"{wanted.world}/scenarios/{item}"
 

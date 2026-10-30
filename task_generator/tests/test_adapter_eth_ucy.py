@@ -122,13 +122,16 @@ def test_scenario_entries_carry_the_keys_of_a_native_entry(importer, tmp_path: P
 def test_tracks_replay_the_recorded_positions_at_the_sequence_frame_rate(importer, tmp_path: Path) -> None:
     from arena_simulation_setup.shared.track import Track
 
+    from task_generator.adapters.eth_ucy import SEQUENCES, in_meters
+
     scenario = importer.import_item("zara01", tmp_path / "worlds")
     walker = Track.load(scenario / "ped_2.csv")
     assert (walker.start, walker.end) == pytest.approx((10 / 25, 60 / 25))
     middle = walker.state(35 / 25)
-    assert (middle.x, middle.y) == pytest.approx((2.0, 1.0), abs=1e-3)
-    assert math.hypot(middle.vx, middle.vy) == pytest.approx(4.0 / 2.0, rel=1e-3)
-    assert math.cos(middle.yaw) == pytest.approx(-1.0, abs=1e-6)
+    x, y = in_meters(SEQUENCES["zara01"].to_meters, np.array([2.0, 1.0]), np.array([1.0, 1.0]))
+    assert (middle.x, middle.y) == pytest.approx((x[0], y[0]), abs=1e-3)
+    assert math.hypot(middle.vx, middle.vy) == pytest.approx(4.0 / 2.0 * math.hypot(x[1] - x[0], y[1] - y[0]), rel=1e-3)
+    assert math.remainder(middle.yaw - math.atan2(y[1] - y[0], x[1] - x[0]), 2.0 * math.pi) == pytest.approx(0.0, abs=1e-4)
 
 
 def test_scenario_loads_as_native_pedestrians_walking_their_tracks(importer, tmp_path: Path) -> None:
@@ -136,7 +139,10 @@ def test_scenario_loads_as_native_pedestrians_walking_their_tracks(importer, tmp
     from arena_simulation_setup.shared.track import Track, track_file
     from arena_simulation_setup.tree.assets.Human import HumanIdentifier
 
-    from task_generator.adapters.eth_ucy import MODEL
+    from task_generator.adapters.eth_ucy import MODEL, SEQUENCES
+
+    zara = np.array(SEQUENCES["zara01"].to_meters)
+    along_x = math.hypot(zara[0, 0], zara[1, 0])
 
     out = tmp_path / "worlds"
     directory = importer.import_item("zara01", out)
@@ -153,7 +159,7 @@ def test_scenario_loads_as_native_pedestrians_walking_their_tracks(importer, tmp
         track = Track.load(track_file(ped))
         assert (ped.pose.position.x, ped.pose.position.y) == pytest.approx((track.x[0], track.y[0]), abs=1e-3)
         assert math.remainder(ped.pose.orientation.to_yaw() - track.yaw[0], 2.0 * math.pi) == pytest.approx(0.0, abs=1e-3)
-        assert ped.velocity == pytest.approx({"ped_1": 2.5, "ped_2": 2.0}[ped.name], abs=0.01)
+        assert ped.velocity == pytest.approx({"ped_1": 2.5, "ped_2": 2.0}[ped.name] * along_x, abs=0.01)
         assert ped.agent == {"agent_type": "adult", "desired_velocity": ped.velocity}
         assert ped.waypoint_mode == "once"
         assert len(ped.waypoints) >= 1
@@ -252,20 +258,39 @@ def test_stays_match_the_timed_desire_of_the_humansim_importer(tmp_path: Path) -
 def test_a_sequence_is_moved_into_the_frame_of_its_scene(importer, tmp_path: Path) -> None:
     from arena_simulation_setup.shared.track import Track
 
-    from task_generator.adapters.eth_ucy import SEQUENCES
+    from task_generator.adapters.eth_ucy import SEQUENCES, in_meters
 
     assert [item for item, entry in SEQUENCES.items() if entry.shift != (0.0, 0.0)] == ["zara02"]
     dx, dy = SEQUENCES["zara02"].shift
     walker = Track.load(importer.import_item("zara02", tmp_path / "worlds") / "ped_5.csv")
     first, last = walker.state(walker.start), walker.state(walker.end)
-    assert (first.x, first.y) == pytest.approx((0.0 + dx, -1.0 + dy), abs=1e-3)
-    assert (last.x, last.y) == pytest.approx((0.0 + dx, 3.0 + dy), abs=1e-3)
+    x, y = in_meters(SEQUENCES["zara02"].to_meters, np.array([0.0 + dx, 0.0 + dx]), np.array([-1.0 + dy, 3.0 + dy]))
+    assert (first.x, first.y) == pytest.approx((x[0], y[0]), abs=1e-3)
+    assert (last.x, last.y) == pytest.approx((x[1], y[1]), abs=1e-3)
+
+
+def test_zara_and_univ_go_to_meters_and_eth_and_hotel_stay() -> None:
+    from task_generator.adapters.eth_ucy import IDENTITY, SEQUENCES, in_meters, pose_in_meters
+
+    assert SEQUENCES["eth"].to_meters == IDENTITY and SEQUENCES["hotel"].to_meters == IDENTITY
+    assert SEQUENCES["zara01"].to_meters == SEQUENCES["zara02"].to_meters
+    car = np.array([[-4.5165, -8.0188], [-6.7488, -8.113], [-6.7488, -3.9102], [-4.5165, -3.816]])
+    x, y = in_meters(SEQUENCES["zara01"].to_meters, car[:, 0], car[:, 1])
+    assert (math.hypot(x[1] - x[0], y[1] - y[0]), math.hypot(x[2] - x[1], y[2] - y[1])) == pytest.approx((1.81, 4.63), abs=0.005)
+    tiles = np.array([[1.3808, -1.3169], [-1.905, -1.3454], [-2.0757, 1.2316], [1.5679, 1.2273]])
+    x, y = in_meters(SEQUENCES["univ"].to_meters, tiles[:, 0], tiles[:, 1])
+    sides = [math.hypot(x[a] - x[b], y[a] - y[b]) for a, b in ((0, 1), (3, 2), (0, 3), (1, 2))]
+    assert sides == pytest.approx([2.95, 2.95, 3.0, 3.0], abs=0.005)
+    mx, my, yaw = pose_in_meters(SEQUENCES["zara01"].to_meters, (1.0, 2.0, 0.0))
+    ax, ay = in_meters(SEQUENCES["zara01"].to_meters, np.array([2.0]), np.array([2.0]))
+    assert yaw == pytest.approx(math.atan2(ay[0] - my, ax[0] - mx), abs=1e-6)
+    assert pose_in_meters(IDENTITY, (1.0, 2.0, 0.4)) == pytest.approx((1.0, 2.0, 0.4))
 
 
 def test_floor_holds_every_walked_path_with_a_footprint(importer, tmp_path: Path) -> None:
     import shapely
 
-    from task_generator.adapters.eth_ucy import FOOTPRINT_M, SEQUENCES
+    from task_generator.adapters.eth_ucy import FOOTPRINT_M, SEQUENCES, in_meters
 
     out = tmp_path / "worlds"
     importer.import_item("zara01", out)
@@ -275,7 +300,8 @@ def test_floor_holds_every_walked_path_with_a_footprint(importer, tmp_path: Path
     for item in ("zara01", "zara02"):
         dx, dy = SEQUENCES[item].shift
         for _, _, _, start, end in WALKERS[item]:
-            path = shapely.LineString([(start[0] + dx, start[1] + dy), (end[0] + dx, end[1] + dy)])
+            x, y = in_meters(SEQUENCES[item].to_meters, np.array([start[0] + dx, end[0] + dx]), np.array([start[1] + dy, end[1] + dy]))
+            path = shapely.LineString(np.column_stack([x, y]))
             assert floor.buffer(1e-6).covers(path)
             assert walls.distance(path) >= FOOTPRINT_M - 0.06
 
@@ -362,7 +388,7 @@ def test_live_zara_sequences_walk_the_same_pavement_in_the_scene_frame(tmp_path:
     walked = []
     for item in ("zara01", "zara02"):
         entry = SEQUENCES[item]
-        bodies = parse_sequence(provider.get(entry.file, tmp_path / f"{item}.csv"), entry.fps, entry.shift)
+        bodies = parse_sequence(provider.get(entry.file, tmp_path / f"{item}.csv"), entry.fps, entry.shift, entry.to_meters)
         walked.append({(round(float(x) / 0.1), round(float(y) / 0.1)) for body in bodies for x, y in zip(body.x, body.y, strict=True)})
     assert len(walked[0] & walked[1]) / len(walked[0] | walked[1]) > 0.65
 
@@ -378,7 +404,7 @@ def test_live_floors_are_plain_polygons_around_every_recorded_step(tmp_path: Pat
         bodies = []
         for item in scene_items(scene):
             entry = SEQUENCES[item]
-            bodies += parse_sequence(provider.get(entry.file, tmp_path / f"{item}.csv"), entry.fps, entry.shift)
+            bodies += parse_sequence(provider.get(entry.file, tmp_path / f"{item}.csv"), entry.fps, entry.shift, entry.to_meters)
         floor = walked_area(bodies)
         walked = shapely.union_all([shapely.LineString(np.column_stack([body.x, body.y])) for body in bodies])
         assert floor.covers(walked), scene

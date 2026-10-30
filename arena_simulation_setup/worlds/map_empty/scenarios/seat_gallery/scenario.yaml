@@ -1,0 +1,48 @@
+format: arena-scenario/2
+objects:
+- name: armchair
+  model: Hospital/Patient_Armchair
+  pose: [4.0, 12.0, 0.0]
+  humansim: {type: gallery_armchair, capacity: 1}
+- name: sofa
+  model: Hospital/Waiting_Room_Sofa
+  pose: [8.0, 12.0, 0.0]
+  humansim: {type: gallery_sofa}
+- name: bench
+  model: Hospital/Waiting_Room_Bench
+  pose: [12.0, 12.0, 0.0]
+  humansim: {type: gallery_bench, capacity: 1}
+- name: stool
+  model: Hospital/Medical_Stool
+  pose: [16.0, 12.0, 0.0]
+  humansim: {type: gallery_stool, capacity: 1, interaction_radius: 1.0}
+- name: hospital_bed
+  model: Hospital/SM_HospitalBed_01b
+  pose: [20.0, 12.0, 0.0]
+  humansim: {type: gallery_hospital_bed, capacity: 1, seats: [{x: -0.2, y: 0.1, yaw: -1.5708}]}
+- name: bed
+  model: Residential/Bed_B
+  pose: [24.0, 12.0, 0.0]
+  humansim: {type: gallery_bed, capacity: 1, seats: [{x: -0.3, y: 0.1, yaw: -1.5708}]}
+- name: low_seat
+  model: Office/SM_ToiletClosed
+  pose: [12.0, 5.0, -1.5708]
+  humansim: {type: gallery_low_seat, capacity: 1, interaction_radius: 1.0}
+- name: high_stool
+  model: Hospital/Lab_Stool
+  pose: [16.0, 5.0, 0.0]
+  humansim: {type: gallery_high_stool, capacity: 1, interaction_radius: 1.0}
+humans:
+- {name: armchair_sitter, model: Hospital/patient_female_caucasian_old, pose: [4.0, 9.0, 1.5708], agent: {agent_type: ./armchair.yaml}}
+- {name: sofa_sitter_1, model: Hospital/doctor_male_african_middleage, pose: [7.6, 9.0, 1.5708], agent: {agent_type: ./sofa.yaml}}
+- {name: sofa_sitter_2, model: Hospital/nurse_female_asian_young, pose: [8.4, 9.0, 1.5708], agent: {agent_type: ./sofa.yaml}}
+- {name: bench_sitter, model: Hospital/nurse_male_african_young, pose: [12.0, 9.0, 1.5708], agent: {agent_type: ./bench.yaml}}
+- {name: stool_sitter, model: Hospital/doctor_female_asian_middleage, pose: [16.0, 9.0, 1.5708], agent: {agent_type: ./stool.yaml}}
+- {name: hospital_bed_patient, model: Hospital/patient_female_african_middleage, pose: [20.0, 9.0, 1.5708], agent: {agent_type: ./hospital_bed.yaml}}
+- {name: bed_sleeper, model: Hospital/patient_female_asian_old, pose: [24.0, 9.0, 1.5708], agent: {agent_type: ./bed.yaml}}
+- {name: low_seat_sitter, model: Hospital/patient_female_caucasian_middleage, pose: [12.0, 2.0, 1.5708], agent: {agent_type: ./low_seat.yaml}}
+- {name: high_stool_sitter, model: Hospital/nurse_female_african_young, pose: [16.0, 2.0, 1.5708], agent: {agent_type: ./high_stool.yaml}}
+robots:
+- start: [14.0, 19.0, 0.0]
+  phases:
+  - {goto: [14.0, 19.0, 0.0], hold_time: 100000.0}

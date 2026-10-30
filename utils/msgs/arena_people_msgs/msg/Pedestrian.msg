@@ -5,6 +5,7 @@ string name
 uint32 id
 
 # Spatial information
+# Body frame: origin at the soles under the pelvis, z up the body.
 geometry_msgs/Pose pose
 geometry_msgs/Twist twist
 
@@ -40,4 +41,3 @@ string model_uri
 int32 interaction_id -1
 # Kind of that interaction, meaningful only when interaction_id >= 0.
 uint8 interaction_type
-

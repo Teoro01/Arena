@@ -64,6 +64,13 @@ arena_mujoco:  run_mujoco.launch.py                           (MuJoCo server)
 
 - Reached via `arena feature isaac launch` (which, in docker, brings up the
   separate `isaac` compose service first).
+- In docker the launch first builds `isaacsim_msgs` and `arena_people_msgs` from
+  the workspace without symlinks into `install/.isaac_bridge`, which the `isaac`
+  service mounts, so Isaac speaks the workspace's message definitions instead of
+  the ones baked into the image. Before Isaac Sim starts,
+  `arena_isaac/bridge_check.py` loads every type of both packages from that tree
+  with Isaac's Python and compares the rclpy, rcl and Fast DDS versions of the
+  two containers. Any failure or version mismatch stops the launch with the list.
 
 ## Adding a new simulator
 

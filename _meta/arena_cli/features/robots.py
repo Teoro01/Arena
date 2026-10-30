@@ -498,7 +498,7 @@ def check(argv: list[str]) -> None:
     """Verify every package://arena_robots/... URI resolves, or preflight robots in the simulator with --sim.
 
     `arena feature robots check [--all] [-q]`: static URI check, `--all` includes robots whose mesh submodules are not checked out.
-    `arena feature robots check --sim [--lanes N] <name...|--all> [sim:=gazebo] [KEY:=VALUE ...]`: per robot two episodes of
+    `arena feature robots check --sim [--lanes N] <name...|--all> [sim:=...] [KEY:=VALUE ...]`: per robot two episodes of
     map_empty's `preflight` scenario under its default planner, verdict wedged/weak/ok, exit 3 on either (needs the evaluation feature).
     """
     if "--sim" in argv:

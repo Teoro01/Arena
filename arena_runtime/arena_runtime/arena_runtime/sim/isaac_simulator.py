@@ -80,6 +80,7 @@ from task_generator.shared import Wall as WallDefinition
 from task_generator.utils.flags import ObstaclesOptim, obstacles_optim_level
 
 from arena_runtime._node import NodeInterface
+from arena_runtime.constants import SimSimulator
 from arena_runtime.sim import BaseSim, SimKwargs, SimLifecycle
 from arena_runtime.sim._articulation import ArticulatedObject, command_fields, link_message
 from arena_runtime.sim._articulation import JointCommand as ArticulatedCommand
@@ -350,6 +351,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
                     control_spec.config,
                     robot.sim_path,
                     robot.frame.tf(),
+                    sim=SimSimulator.ISAAC,
                     prefix=control_prefix,
                 )
                 if control_spec.config is not None

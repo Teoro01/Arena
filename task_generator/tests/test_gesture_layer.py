@@ -762,3 +762,17 @@ def test_a_reverse_clip_keeps_its_wrap_through_the_layer() -> None:
     mgr = AnimationManager(logger=StubLogger(), fps=20.0)
     clip = ClipGesture(mgr).start(np.zeros(3), {"clip": "talk_with_arm_gesture"})
     assert clip.loop and clip.reverse
+
+
+def test_a_clip_with_release_frames_plays_them_when_its_slot_ends(rig) -> None:
+    mgr, layer, _ = rig
+    down = [{"angles": {**dict.fromkeys(JOINT_NAMES, 0.0), "l_knee": -0.2 * k}} for k in range(8)]
+    mgr.register_transient("squat_cut", down, fps=20.0, release=down[::-1])
+    body = req(Channel("body", (0.0, 0.0, 0.0), clip="squat_cut"))
+    st = to_hold(mgr, layer, 4, body, slot="body")
+    assert st.clip.release == down[::-1]
+    settle(mgr, 4, body, st)
+    assert tick(mgr, 4, body)["l_knee"] == pytest.approx(-1.4, abs=0.05)
+    knees = [tick(mgr, 4, req())["l_knee"] for _ in range(10)]
+    assert st.phase == "release"
+    assert knees[-1] > knees[0] + 0.5

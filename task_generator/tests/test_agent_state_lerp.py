@@ -9,11 +9,13 @@ import pytest
 
 pytest.importorskip("rclpy")
 
+from arena_humansim.core.interaction_kinds import InteractionType
 from arena_humansim_msgs.msg import AgentFrame, AgentGestures, AgentMeta, AgentState, Gesture
 from geometry_msgs.msg import Point
 from task_generator.manager.realizer import Realizer
-from task_generator.simulators.human.arena_humansim.arena_humansim import ArenaHumanSimulator
+from task_generator.simulators.human.arena_humansim.arena_humansim import ArenaHumanSimulator, Seat, SeatHold
 from task_generator.simulators.human.profile import default_profile
+from task_generator.simulators.human.support import Support
 
 INTERPOLATED = {"header", "x", "y", "theta", "vx", "vy", "gait_phase"}
 
@@ -36,6 +38,8 @@ def _adapter(prev: AgentFrame | None = None, curr: AgentFrame | None = None, ori
     adapter._agent_types = {}
     adapter._agent_type_paths = {}
     adapter._pose_profiles = {}
+    adapter._seats = {}
+    adapter._seat_holds = {}
     adapter._realizer = Realizer(Realizer._Configuration(x=origin[0], y=origin[1], prefix="env_0"))
     return adapter
 
@@ -232,6 +236,15 @@ def test_pedestrians_default_gait_fields_when_the_frame_has_none() -> None:
     frame = _frame(1, agent_id=[1, 2], x=[0.0, 0.0], y=[0.0, 0.0], theta=[0.0, 0.0], vx=[0.0, 0.0], vy=[0.0, 0.0], animation_state=[1, 1])
     peds = _adapter()._agent_states_to_pedestrians(frame).pedestrians
     assert [(p.gait_phase, p.gait_cadence, p.agent_type) for p in peds] == [(0.0, 0.0, ""), (0.0, 0.0, "")]
+
+
+def test_agents_parked_on_their_held_seat_rest_on_it() -> None:
+    adapter = _adapter()
+    adapter._seats = {"env_0/bed": [Seat(x=2.0, y=0.0, height=0.6)], "env_0/stool": [Seat(x=-2.0, y=0.0, height=math.nan)]}
+    adapter._seat_holds = {1: SeatHold(InteractionType.LIE_ON, "env_0/bed", 0), 2: SeatHold(InteractionType.LIE_ON, "env_0/bed", 0), 3: SeatHold(InteractionType.SIT_ON, "env_0/stool", 0)}
+    frame = _frame(1, agent_id=[1, 2, 3, 4], x=[2.0, 2.5, -2.0, 2.0], y=[0.01, 0.0, 0.0, 0.0], theta=[0.0] * 4, vx=[0.0] * 4, vy=[0.0] * 4, animation_state=[0] * 4)
+    peds = adapter._agent_states_to_pedestrians(frame).pedestrians
+    assert {ped.id: adapter._support(ped) for ped in peds} == {1: Support("lie", 0.6), 2: None, 3: None, 4: None}
 
 
 def test_roster_after_removal_covers_the_engines_last_frame() -> None:

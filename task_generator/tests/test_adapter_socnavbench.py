@@ -280,21 +280,24 @@ def test_placement_inverts_gather_posn_data_with_heading(importer) -> None:
 
 
 def test_start_and_goal_land_in_the_frame_of_the_scene_world(importer) -> None:
-    from task_generator.adapters.eth_ucy import SEQUENCES
+    from task_generator.adapters.eth_ucy import SEQUENCES, pose_in_meters
     from task_generator.adapters.socnavbench import scene_pose
 
     eth = importer.placements["eth"]
     assert scene_pose(eth, SEQUENCES["eth"], (5.0, 1.0, 1.5)) == pytest.approx((13.4, 3.6, 1.5 + math.pi / 2), abs=1e-9)
     assert scene_pose(eth, SEQUENCES["eth"], (12.5, 15.5, 0.0)) == pytest.approx((-1.1, 11.1, math.pi / 2), abs=1e-9)
     assert gather_posn(eth, 13.4, 3.6) == pytest.approx((5.0, 1.0))
+    zara = SEQUENCES["zara01"].to_meters
     zara01 = scene_pose(importer.placements["zara01"], SEQUENCES["zara01"], (8.0, 8.0, 0.0))
-    assert zara01[:2] == pytest.approx((1.5, -5.0))
-    assert _turn(zara01[2], math.pi) < 1e-9
+    expected = pose_in_meters(zara, (1.5, -5.0, math.pi))
+    assert zara01[:2] == pytest.approx(expected[:2])
+    assert _turn(zara01[2], expected[2]) < 1e-9
     zara02 = scene_pose(importer.placements["zara02"], SEQUENCES["zara02"], (20.0, 13.0, -1.5))
-    assert zara02[:2] == pytest.approx((-10.5, -10.0))
-    assert _turn(zara02[2], math.pi - 1.5) < 1e-9
+    expected = pose_in_meters(zara, (-10.5, -10.0, math.pi - 1.5))
+    assert zara02[:2] == pytest.approx(expected[:2])
+    assert _turn(zara02[2], expected[2]) < 1e-9
     raw = importer.placements["zara02"].from_map((20.0, 13.0, -1.5))
-    assert (zara02[0] - raw[0], zara02[1] - raw[1]) == pytest.approx(SEQUENCES["zara02"].shift)
+    assert pose_in_meters(zara, (raw[0] + SEQUENCES["zara02"].shift[0], raw[1] + SEQUENCES["zara02"].shift[1], raw[2]))[:2] == pytest.approx(zara02[:2])
     assert gather_posn(importer.placements["zara02"], raw[0], raw[1]) == pytest.approx((20.0, 13.0))
 
 
@@ -434,17 +437,18 @@ def test_scenario_loads_natively_with_the_robot_start_and_goal(importer, tmp_pat
 def test_floor_holds_every_start_and_goal_with_room_for_the_robot(importer, tmp_path: Path) -> None:
     import shapely
 
-    from task_generator.adapters.eth_ucy import FOOTPRINT_M, SEQUENCES, parse_sequence, scene_items, walked_area
+    from task_generator.adapters.eth_ucy import FOOTPRINT_M, SEQUENCES, in_meters, parse_sequence, scene_items, walked_area
     from task_generator.adapters.socnavbench import DATASETS
 
     out = tmp_path / "worlds"
     importer.import_item("t_cross", out)
     importer.import_item("t_late", out)
-    for scene, expected in (("zara", [(1.5, -5.0), (-5.5, 0.0), (-10.5, -10.0), (8.0, -5.0)]), ("eth", [(9.4, 6.6), (-0.6, 10.6), (13.4, 3.6), (-1.1, 11.1)])):
+    zara_x, zara_y = in_meters(SEQUENCES["zara01"].to_meters, np.array([1.5, -5.5, -10.5, 8.0]), np.array([-5.0, 0.0, -10.0, -5.0]))
+    for scene, expected in (("zara", list(zip(zara_x, zara_y, strict=True))), ("eth", [(9.4, 6.6), (-0.6, 10.6), (13.4, 3.6), (-1.1, 11.1)])):
         stops = importer.stops(scene)
         assert stops == [pytest.approx(stop) for stop in expected]
         floor, walls = _floor(_level(_view(out, f"socnavbench_{scene}")))
-        bodies = [body for item in scene_items(scene) for body in parse_sequence(importer.cache / DATASETS / SEQUENCES[item].file, SEQUENCES[item].fps, SEQUENCES[item].shift)]
+        bodies = [body for item in scene_items(scene) for body in parse_sequence(importer.cache / DATASETS / SEQUENCES[item].file, SEQUENCES[item].fps, SEQUENCES[item].shift, SEQUENCES[item].to_meters)]
         walked = walked_area(bodies)
         assert not all(walked.contains(shapely.Point(stop)) for stop in stops)
         for stop in stops:
@@ -568,7 +572,7 @@ def test_live_episodes_select_the_published_windows_on_floors_that_hold_every_st
         assert episode.max_time == max_time, item
     assert importer.placements["eth"].from_map(importer.episodes["t_eth_dense_against"].start) == pytest.approx((13.4, 3.6, 1.5 + math.pi / 2))
     for scene in ("eth", "zara"):
-        bodies = [body for other in scene_items(scene) for body in parse_sequence(importer.cache / DATASETS / SEQUENCES[other].file, SEQUENCES[other].fps, SEQUENCES[other].shift)]
+        bodies = [body for other in scene_items(scene) for body in parse_sequence(importer.cache / DATASETS / SEQUENCES[other].file, SEQUENCES[other].fps, SEQUENCES[other].shift, SEQUENCES[other].to_meters)]
         stops = importer.stops(scene)
         assert len(stops) == 2 * sum(1 for world, *_ in LIVE.values() if world == world_name(scene))
         floor = walked_area(bodies, stops)
@@ -586,14 +590,16 @@ def test_live_episode_imports_with_every_selected_pedestrian(tmp_path: Path) -> 
     import shapely
     from arena_simulation_setup.shared.track import Track
 
+    from task_generator.adapters.eth_ucy import SEQUENCES, in_meters
     from task_generator.adapters.socnavbench import SocNavBench
 
     out = tmp_path / "worlds"
     target = SocNavBench(cache=tmp_path / "cache").import_item("t_zara2_wrap", out)
+    start_x, start_y = in_meters(SEQUENCES["zara02"].to_meters, np.array([-10.5]), np.array([-10.0]))
     view = _view(out, "socnavbench_zara")
     scenario = view.scenario("t_zara2_wrap").resolve_sync().load()
     assert len(scenario.humans) == LIVE["t_zara2_wrap"][2]
-    assert (scenario.robots[0].start.position.x, scenario.robots[0].start.position.y) == pytest.approx((-10.5, -10.0))
+    assert (scenario.robots[0].start.position.x, scenario.robots[0].start.position.y) == pytest.approx((start_x[0], start_y[0]), abs=1e-3)
     played = [Track.load(target / f"{obstacle.name}.csv") for obstacle in scenario.humans]
     assert sum(1 for track in played if track.start == 0.0) == 3
     assert max(track.end for track in played) == pytest.approx(60.0)

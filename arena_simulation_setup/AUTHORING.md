@@ -887,6 +887,8 @@ to the cabin centre, waits inside until the elevator teleports it, then
 continues with the next waypoint. When two consecutive waypoints (or the
 ped's start and its first waypoint) lie on different levels, the boarding
 cabins of the shortest elevator route are inserted as rides automatically.
+A ped waiting at an open cabin lets those getting out leave first, for up to
+`humansim.zone_let_out_timeout` seconds (default 10, `0` boards at once).
 For a multi-destination elevator the boarding ped writes the elevator's
 `target` (the destination toward its next waypoint) when it reaches the
 cabin centre. A ped holding for a ride never sees the next level's waypoint,
