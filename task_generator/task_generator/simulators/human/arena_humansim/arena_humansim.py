@@ -89,7 +89,7 @@ from arena_people_msgs.msg import Pedestrian, Pedestrians
 from arena_rclpy_mixins.Async import ClientWrapper
 from arena_rclpy_mixins.lazy import LazySubscription
 from arena_runtime_msgs.msg import LockstepChannel
-from arena_simulation_setup.shared.world import CABIN_DOOR_INSET, CABIN_DOOR_THRESHOLD, CABIN_DOOR_WIDTH
+from arena_simulation_setup.shared.world import CABIN_DOOR_INSET, CABIN_DOOR_THRESHOLD, CABIN_DOOR_WIDTH, Stairs
 from arena_simulation_setup.tree.assets.Human import HumanIdentifier
 from arena_simulation_setup.tree.World.model import elevator_doorway_pose
 from arena_simulation_setup.utils.affordance import AffordanceClaims, AffordanceKind, AffordanceSlot, SlotOccupied, conflicts, has_z, max_occupancy, placed_slots
@@ -129,6 +129,8 @@ from .agent import ArenaHumanDynamicObstacle, agent_type_def, agent_type_stimuli
 _DEFERRED_ID_BASE = 1 << 24
 
 _QUEUE_FRONT_OFFSET = 0.7
+TELEPORT_JUMP_M = 2.0
+STAIRS_QUEUE_M = 0.8
 _QUEUE_STEP = 0.8
 
 
@@ -706,6 +708,9 @@ class ArenaHumanSimulator(BaseHumanSimulator):
             self._teleport_stamps = {agent_id: stamp for agent_id, stamp in self._teleport_stamps.items() if prev_ns < stamp}
             keep = ~np.isin(np.asarray(curr.agent_id)[ci], list(self._teleport_stamps))
             ci, pi = ci[keep], pi[keep]
+        speed = np.maximum(np.hypot(np.asarray(curr.vx)[ci], np.asarray(curr.vy)[ci]), np.hypot(np.asarray(prev.vx)[pi], np.asarray(prev.vy)[pi]))
+        jumped = np.hypot(np.asarray(curr.x)[ci] - np.asarray(prev.x)[pi], np.asarray(curr.y)[ci] - np.asarray(prev.y)[pi]) > TELEPORT_JUMP_M + speed * dt_ns / 1e9
+        ci, pi = ci[~jumped], pi[~jumped]
 
         # stamp with the time the lerped pose corresponds to, receivers dead-reckon from it
         pose_ns = prev_ns + int(alpha * dt_ns)
@@ -1579,8 +1584,31 @@ class ArenaHumanSimulator(BaseHumanSimulator):
             delay=-1.0,
         )
 
+    def _stair_zone_msg(self, stair: Stairs) -> TeleportZoneMsg:
+        """A realized stair half as a self-teleporting zone in the engine frame, walked from the mouth to the seam, the belt running towards the seam on a boarding escalator half and away from it on an exit half, still and the boarding half closed while the escalator is stopped."""
+        running = self._stair_runs(stair)
+        yaw = stair.yaw
+        mx, my = self._to_engine(stair.mouth.x, stair.mouth.y)
+        q = stair.local(-STAIRS_QUEUE_M, 0.0)
+        qx, qy = self._to_engine(q.x, q.y)
+        h = stair.local(stair.length - stair.inset, 0.0)
+        hx, hy = self._to_engine(h.x, h.y)
+        footprint = [Point32(x=x, y=y, z=0.0) for x, y in (self._to_engine(c.x, c.y) for c in stair.corners(stair.reach))]
+        return TeleportZoneMsg(
+            name=stair.name,
+            destinations=[stair.to] if any(other.name == stair.to for other in self._known_stairs) else [],
+            entry=Pose2DMsg(x=mx, y=my, theta=yaw),
+            wait=Pose2DMsg(x=qx, y=qy, theta=yaw),
+            hold=Pose2DMsg(x=hx, y=hy, theta=yaw),
+            footprint=footprint,
+            open=running or not stair.boards,
+            delay=0.0,
+            kind=stair.kind,
+            belt=stair.belt if running else 0.0,
+        )
+
     async def _set_elevators_impl(self, elevators: Sequence[Elevator]) -> bool:
-        request = SetTeleportZones.Request(zones=[self._zone_msg(elevator) for elevator in elevators])
+        request = SetTeleportZones.Request(zones=[self._zone_msg(elevator) for elevator in elevators] + [self._stair_zone_msg(stair) for stair in self._known_stairs])
         try:
             response = await self._set_teleport_zones_client.call_timeout(request)
         except Exception as e:

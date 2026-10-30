@@ -1,7 +1,7 @@
 import typing
 
 import attrs
-from arena_simulation_setup.shared import Ceiling, Elevator, Light, Schedule, Signal, Sound
+from arena_simulation_setup.shared import Ceiling, Elevator, Light, Placement, Schedule, Signal, Sound, Stairs
 
 from task_generator.shared import (
     Door,
@@ -16,6 +16,7 @@ from task_generator.shared import (
 )
 
 EntityPropsT = typing.TypeVar('EntityPropsT', bound=Entity)
+PlacedT = typing.TypeVar('PlacedT', bound=Wall | Floor | Ceiling | Door | Elevator | Stairs | Light | Entity)
 
 
 class Realizer:
@@ -28,7 +29,10 @@ class Realizer:
     _config: _Configuration
     _level_origins: dict[str, tuple[float, float]]
     _elevator_levels: dict[str, str]
+    _stair_levels: dict[str, str]
     _levels: list[str]
+    _stack_offsets: dict[str, tuple[float, float, float]]
+    _level_bounds: dict[str, tuple[float, float, float, float]]
 
     @typing.overload
     def __init__(self, config: "Realizer._Configuration", level_origins: None = None): ...
@@ -41,7 +45,10 @@ class Realizer:
         self._config = config if config is not None else Realizer._Configuration()
         self._level_origins = level_origins if level_origins is not None else {}
         self._elevator_levels = {}
+        self._stair_levels = {}
         self._levels = []
+        self._stack_offsets = {}
+        self._level_bounds = {}
 
     def set_origin(self, x: float, y: float, level_id: str = "") -> None:
         if level_id == "":
@@ -58,6 +65,48 @@ class Realizer:
     def reset_elevator_levels(self, levels: typing.Mapping[str, str]) -> None:
         """Replace the level of every elevator cabin by cabin name, dropping those of a prior world."""
         self._elevator_levels = {str(cabin): str(level_id) for cabin, level_id in levels.items()}
+
+    def reset_stair_levels(self, levels: typing.Mapping[str, str]) -> None:
+        """Replace the level of every stair half by name, dropping those of a prior world."""
+        self._stair_levels = {str(name): str(level_id) for name, level_id in levels.items()}
+
+    def reset_placement(self, offsets: typing.Mapping[str, tuple[float, float, float]], bounds: typing.Mapping[str, tuple[float, float, float, float]]) -> None:
+        """Replace the simulator offset and the level-local bounds of every level, an empty `offsets` keeping the simulator on the abstract layout."""
+        self._stack_offsets = {str(level_id): (float(x), float(y), float(z)) for level_id, (x, y, z) in offsets.items()}
+        self._level_bounds = {str(level_id): bound for level_id, bound in bounds.items()}
+
+    def placement(self) -> Placement:
+        """The map from the abstract frame into the simulator frame for the current world and env offset."""
+        offsets = self._stack_offsets or {level_id: (x, y, 0.0) for level_id, (x, y) in self._level_origins.items()}
+        return Placement(origins=dict(self._level_origins), offsets=dict(offsets), bounds=dict(self._level_bounds), env=(self._config.x, self._config.y))
+
+    def place(self, target: PlacedT, level_id: str) -> PlacedT:
+        """A realized entity of `level_id` moved from the abstract frame into the simulator frame."""
+        dx, dy, dz = self.placement().shift(level_id)
+        if (dx, dy, dz) == (0.0, 0.0, 0.0):
+            return target
+
+        def at(position: Position) -> Position:
+            return Position(position.x + dx, position.y + dy, position.z + dz)
+
+        if isinstance(target, Wall):
+            return attrs.evolve(target, start=at(target.start), end=at(target.end))
+        if isinstance(target, Floor):
+            return attrs.evolve(target, pos=at(target.pos))
+        if isinstance(target, Ceiling):
+            return attrs.evolve(target, pos=at(target.pos), z=target.z + dz)
+        if isinstance(target, Door):
+            return attrs.evolve(target, start=at(target.start), end=at(target.end))
+        if isinstance(target, Elevator | Stairs):
+            placed = attrs.evolve(target, position=at(target.position))
+            if isinstance(target, Stairs) and isinstance(placed, Stairs):
+                placed.joined = target.joined
+            return placed
+        if isinstance(target, Light):
+            return attrs.evolve(target, pose=None if target.pose is None else Pose(at(target.pose.position), target.pose.orientation), fixtures=[at(fixture) for fixture in target.fixtures])
+        if isinstance(target, Entity):
+            return attrs.evolve(target, pose=Pose(at(target.pose.position), target.pose.orientation))
+        raise TypeError(f'placement not implemented for type {type(target)}')
 
     def reset_levels(self, level_ids: typing.Sequence[str]) -> None:
         """Replace the levels the env runs, dropping those of a prior world."""
@@ -197,6 +246,19 @@ class Realizer:
         )
 
     @typing.overload
+    def realize(self, target: Stairs, level_id: str = "") -> Stairs: ...
+
+    def _realize_stair(self, stair: Stairs, level_id: str = "") -> Stairs:
+        realized = attrs.evolve(
+            stair,
+            name=self._prefix(stair.name, level_id),
+            position=self._realize_position(stair.position, level_id),
+            to=self._prefix(stair.to, self._stair_levels.get(stair.to, '')) if stair.to else '',
+        )
+        realized.joined = stair.joined
+        return realized
+
+    @typing.overload
     def realize(self, target: Schedule, level_id: str = "") -> Schedule: ...
 
     def _realize_schedule(self, schedule: Schedule, level_id: str = "") -> Schedule:
@@ -289,6 +351,9 @@ class Realizer:
 
         elif isinstance(target, Elevator):
             res = self._realize_elevator(target, level_id)
+
+        elif isinstance(target, Stairs):
+            res = self._realize_stair(target, level_id)
 
         elif isinstance(target, Schedule):
             res = self._realize_schedule(target, level_id)

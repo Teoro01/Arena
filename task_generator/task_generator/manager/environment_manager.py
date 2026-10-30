@@ -10,7 +10,7 @@ import shapely
 from arena_runtime._node import NodeInterface
 from arena_runtime.sim import BaseSim
 from arena_runtime.sim._semantics import _SEMANTIC_KINDS
-from arena_simulation_setup.shared import Ceiling, Light
+from arena_simulation_setup.shared import Ceiling, Light, Stairs
 from arena_simulation_setup.tree.World import Level, World, entity_lights
 from arena_simulation_setup.tree.World.model import render_door_polygons, render_elevator_polygons
 from arena_simulation_setup.tree.World.Scenario import TimelineEntry
@@ -178,6 +178,15 @@ class EnvironmentManager(NodeInterface):
             self._stage_ambient_pub = self.node.create_publisher(String, STAGE_AMBIENT_TOPIC, qos)
         else:
             self._stage_ambient_sub = self.node.create_subscription(String, STAGE_AMBIENT_TOPIC, self._on_stage_ambient, qos)
+
+    @property
+    def stacks_levels(self) -> bool:
+        """Whether the simulator can place levels above one another."""
+        return self._simulator.STACKS_LEVELS
+
+    @property
+    def simulator_name(self) -> str:
+        return self._simulator.SIM_NAME
 
     @property
     def _env_name(self) -> str:
@@ -403,6 +412,16 @@ class EnvironmentManager(NodeInterface):
             if realized_sig.semantics:
                 pending.append(("signal", realized_sig.name, list(realized_sig.semantics), None))
         elevators = tuple(elevators_list)
+        stairs_list: list[Stairs] = []
+        for fid, level in _world.levels.items():
+            if not _match_level_id(fid):
+                continue
+            for stair in level.stairs:
+                realized_f = self._realizer.realize(stair, fid)
+                self.node._register_semantic_entity(stair.name, realized_f.name)
+                stairs_list.append(realized_f)
+        stairs = tuple(stairs_list)
+        self._human_simulator.spawn_stairs(stairs)
         statics = tuple(self._realizer.realize(s, fid) for fid, level in _world.levels.items() if _match_level_id(fid) for s in level.all_static_entities)
         if self._skip_obstacles:
             statics = ()
@@ -426,6 +445,8 @@ class EnvironmentManager(NodeInterface):
             futures.append(self._simulator.spawn_walls(lintels, clear_existing=False))
         futures.append(self._human_simulator.spawn_obstacles(statics, layer=ObstacleLayer.WORLD))
         futures.append(self._spawn_elevators(elevators))
+        if stairs:
+            futures.append(self._simulator.spawn_stairs(stairs))
 
         await asyncio.gather(*futures)
         if lights:

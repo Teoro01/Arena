@@ -41,7 +41,7 @@ PARK_DRIFT_M = 0.05
 PARK_TURN_RAD = math.radians(5.0)
 WALL_GRID_RESOLUTION_M = 0.05
 
-Zones = Mapping[str, 'shapely.Polygon']
+Zones = Mapping[str, 'shapely.Polygon | shapely.MultiPolygon']
 FieldLookup = Callable[[str, str], str | None]
 FamilyLookup = Callable[[str, str], Mapping[str, str] | None]
 
@@ -111,16 +111,22 @@ class Sample:
         return False if name in self.known or name in self.peds or name in self.robots else None
 
 
-def zone_polygons(level: Level) -> dict[str, shapely.Polygon]:
-    """Zone, door and elevator polygons of a compacted level, keyed by name."""
+def zone_polygons(level: Level) -> dict[str, shapely.Polygon | shapely.MultiPolygon]:
+    """Zone, door, elevator and stair polygons of a compacted level, keyed by name."""
     import shapely
 
-    polygons: dict[str, shapely.Polygon] = {}
+    polygons: dict[str, shapely.Polygon | shapely.MultiPolygon] = {}
     for name in level.zone_ref_names():
         corners = level.lookup_zone_polygon(name)
         if corners is None or len(corners) < 3:
             continue
         polygons[name] = shapely.Polygon([(c.x, c.y) for c in corners])
+    groups: dict[str, list[shapely.Polygon]] = {}
+    for stair in level.stairs:
+        half = polygons[stair.name]
+        if stair.group and isinstance(half, shapely.Polygon):
+            groups.setdefault(stair.group, []).append(half)
+    polygons.update((name, shapely.MultiPolygon(halves)) for name, halves in groups.items())
     return polygons
 
 

@@ -424,3 +424,17 @@ def test_loaded_cabin_reopens_only_for_a_body_in_its_door_threshold(shim, on_dum
         assert a.dispatched == ({"rider"} if departs else set())
 
     on_dummy_sim(body)
+
+
+def test_dummy_spawns_stairs_as_a_no_op(on_dummy_sim):
+    from task_generator.shared import Position
+
+    from arena_simulation_setup.shared import Stairs
+
+    async def body(sim):
+        assert await sim.spawn_stairs([Stairs(name="stairs_low", position=Position(10.3, 2.0, 0.0), to="stairs_high")])
+        assert sim._stair_runtime == {}
+        assert sim._mechanism_loop_task is None
+        assert await sim.remove_mechanisms()
+
+    on_dummy_sim(body)

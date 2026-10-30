@@ -1,11 +1,12 @@
 import asyncio
+import copy
 import itertools
 import os
 import traceback
 import types
 import typing
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import arena_mujoco_msgs.msg
 import arena_robots.catalog
@@ -17,6 +18,7 @@ import geometry_msgs.msg
 import launch
 import launch.event_handlers
 import launch_ros
+import rclpy.task
 import std_srvs.srv
 from arena_mujoco_msgs.msg import (
     ArticulatedLink,
@@ -38,6 +40,7 @@ from arena_mujoco_msgs.srv import (
     DriveArticulated,
     EditPrims,
     SetLights,
+    SetMapOffset,
     SpawnArticulated,
     SpawnCeilings,
     SpawnFloors,
@@ -91,7 +94,7 @@ from arena_runtime.sim._control import (
 )
 from arena_runtime.sim._interface import offset_pose, resolve_obstacle_box
 from arena_runtime.sim._urdf import transform_urdf_for_bridge
-from arena_runtime.sim._walls import realize_renderable
+from arena_runtime.sim._walls import realize_renderable, sloped_box
 
 """
 MujocoHost is constructed once by arena_node and owns process-singleton resources for MuJoCo: the lifecycle (pause/unpause/cleanup/step) and its service clients.
@@ -102,6 +105,39 @@ _MUJOCO_PHYSICS_DT = 0.002
 _MESH_MODEL_TYPES = (ModelType.SDF, ModelType.OBJ)
 _SPAWN_ASSETS_TIMEOUT_S = 300.0
 _RESEND_AFTER_S = 10.0
+_PRIM_BATCH_WINDOW_S = 0.02
+
+
+class _PrimBatch:
+    """Sends the prims of spawn_box calls that arrive within a short window as one SpawnPrims request."""
+
+    def __init__(self, client: ClientWrapper, env_id: int) -> None:
+        self._client = client
+        self._env_id = env_id
+        self._pending: list[tuple[Prim, asyncio.Future[bool]]] = []
+        self._flush: asyncio.Task[None] | None = None
+
+    async def submit(self, prim: Prim) -> bool:
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._pending.append((prim, future))
+        if self._flush is None:
+            self._flush = asyncio.create_task(self._send())
+        return await future
+
+    async def _send(self) -> None:
+        await asyncio.sleep(_PRIM_BATCH_WINDOW_S)
+        batch, self._pending, self._flush = self._pending, [], None
+        try:
+            res = await self._client.call_timeout(SpawnPrims.Request(env_id=self._env_id, prims=[prim for prim, _ in batch]))
+        except Exception as e:
+            for _, future in batch:
+                if not future.done():
+                    future.set_exception(e)
+            return
+        ret = list(res.ret) if res is not None else []
+        for i, (_, future) in enumerate(batch):
+            if not future.done():
+                future.set_result(i < len(ret) and bool(ret[i]))
 
 
 class MujocoHost(SimLifecycle):
@@ -183,9 +219,18 @@ def material_to_msg(material: arena_simulation_setup.tree.assets.Material.Materi
     )
 
 
+def _vector(velocity: tuple[float, float, float]) -> geometry_msgs.msg.Vector3:
+    return geometry_msgs.msg.Vector3(x=float(velocity[0]), y=float(velocity[1]), z=float(velocity[2]))
+
+
+def _shifted(point: geometry_msgs.msg.Point, shift: tuple[float, float, float]) -> geometry_msgs.msg.Point:
+    return geometry_msgs.msg.Point(x=point.x + shift[0], y=point.y + shift[1], z=point.z + shift[2])
+
+
 class MujocoSimulator(BaseSim, NodeInterface):
     ARTICULATED_PHYSICS = True
     SIM_NAME = 'mujoco'
+    STACKS_LEVELS = True
 
     def __init__(self, **kwargs: typing.Unpack[SimKwargs]) -> None:
         """Initialize MujocoSimulator"""
@@ -208,6 +253,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
             EditPrims=self.node.create_client_wrapper(EditPrims, "/mujoco/EditPrims"),
             MovePedestrians=self.node.create_client_wrapper(MovePedestrians, "/mujoco/MovePedestrians"),
             SetLights=self.node.create_client_wrapper(SetLights, "/mujoco/SetLights"),
+            SetMapOffset=self.node.create_client_wrapper(SetMapOffset, "/mujoco/SetMapOffset"),
             SpawnArticulated=self.node.create_client_wrapper(SpawnArticulated, "/mujoco/SpawnArticulated", timeout=_SPAWN_ASSETS_TIMEOUT_S),
             SpawnCeilings=self.node.create_client_wrapper(SpawnCeilings, "/mujoco/SpawnCeilings"),
             SpawnFloors=self.node.create_client_wrapper(SpawnFloors, "/mujoco/SpawnFloors"),
@@ -217,9 +263,11 @@ class MujocoSimulator(BaseSim, NodeInterface):
             SpawnUrdf=self.node.create_client_wrapper(SpawnUrdf, "/mujoco/SpawnUrdf"),
             SpawnWalls=self.node.create_client_wrapper(SpawnWalls, "/mujoco/SpawnWalls"),
         )
+        self._prim_batch = _PrimBatch(self._clients.SpawnPrims, self._env_id)
         self._peds_publisher = self.node.create_publisher(Pedestrians, "/mujoco/arena_peds", 10)
 
         self._robot_prims: dict[str, str] = {}
+        self._map_offsets: dict[str, tuple[float, float, float]] = {}
         self._box_centers: dict[str, tuple[float, float, float]] = {}
 
     def _robot_loader_args(self, robot: Robot) -> dict[str, object]:
@@ -282,7 +330,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
                             tf_prefix=robot.frame.tf(),
                             base_frame=robot_params.base_frame,
                             odom_frame=robot_params.odom_frame,
-                            pose=robot.pose.to_msg(),
+                            pose=self._placed(robot.pose).to_msg(),
                             cmd_vel_topic=self.node.service_namespace(robot.name, 'cmd_vel'),
                             joint_states_topic=self.node.service_namespace(robot.name, 'joint_states'),
                             odom_topic='' if relays_odom else self.node.service_namespace(robot.name, 'odom'),
@@ -302,12 +350,21 @@ class MujocoSimulator(BaseSim, NodeInterface):
                         self._logger.error(f"SpawnUrdf failed for {fq_name!r}: {'timeout' if spawn_res is None else 'spawn error, check mujoco log'}")
                         return False
 
+                    self._track_level(robot.sim_path, robot.pose)
+                    self._robot_prims[robot.sim_path] = spawn_res.path
+                    self._map_offsets.pop(robot.sim_path, None)
+                    if (offset := self._map_offset_request(robot.sim_path)) is not None:
+                        offset_res = await self._clients.SetMapOffset.call_timeout(offset)
+                        if offset_res is None or not offset_res.ok:
+                            self._map_offsets.pop(robot.sim_path, None)
+                            self._logger.error(f"SetMapOffset failed for {fq_name!r}: {'timeout' if offset_res is None else 'no odom entry, check mujoco log'}")
+                            return False
+
                     rsp_urdf_path = bridge_urdf_path if is_ros2_control else str(model.path)
 
                     await self._launch_robot_stack(robot, robot_params, rsp_urdf_path)
 
                     self._register_agent_robot(robot, robot_params)
-                    self._robot_prims[robot.sim_path] = spawn_res.path
                     return True
 
                 raise NotImplementedError(f"robot model of type {model.type} can't be spawned by {self.__class__.__name__}")
@@ -428,7 +485,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
         centers: dict[int, tuple[float, float, float]] = {}
         for i, (obstacle, (meshes, box)) in enumerate(zip(obstacles, plans, strict=True)):
             scale = (1.0, 1.0, 1.0) if obstacle.scale is None else (obstacle.scale.x, obstacle.scale.y, obstacle.scale.z)
-            pose = obstacle.pose
+            pose = self._placed(obstacle.pose)
             if not meshes:
                 if box is None:
                     skipped.append(obstacle.name)
@@ -444,6 +501,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
                     scale=Scale(x=scale[0], y=scale[1], z=scale[2]),
                     mesh_path=meshes[0][1] if meshes else "",
                     visuals=[PrimVisual(name=name, mesh_path=path) for name, path in meshes[1:]],
+                    is_static=True,
                 )
             )
             indices.append(i)
@@ -505,7 +563,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
             pedestrians=[
                 Pedestrian(
                     name=p.sim_path,
-                    pose=p.pose.to_msg(),
+                    pose=self._placed(p.pose).to_msg(),
                 )
                 for p in pedestrians
             ]
@@ -518,7 +576,10 @@ class MujocoSimulator(BaseSim, NodeInterface):
     async def robot_move(self, robots: Sequence[Robot]) -> Sequence[bool]:
         async def move_robot(robot: Robot) -> bool:
             try:
-                return await self._move_entity(self._robot_prims.get(robot.sim_path, self._NS_ROBOT(robot.name)), robot.pose)
+                if not await self._move_entity(self._robot_prims.get(robot.sim_path, self._NS_ROBOT(robot.name)), robot.pose):
+                    return False
+                self._track_level(robot.sim_path, robot.pose)
+                return True
             except Exception as e:
                 self._logger.error(f"Failed to move robot {robot.name}: {e}\n{traceback.format_exc()}")
                 return False
@@ -541,6 +602,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
         names: list[str] = []
         for robot in robots:
             self._forget_agent_robot(robot.sim_path)
+            self._map_offsets.pop(robot.sim_path, None)
             names.append(self._robot_prims.pop(robot.sim_path, self._NS_ROBOT(robot.name)))
         return await asyncio.gather(*(self._delete_entity(name) for name in names))
 
@@ -553,16 +615,22 @@ class MujocoSimulator(BaseSim, NodeInterface):
             await self.remove_world()
         self._logger.debug("Attempting to spawn walls")
 
-        async def create_segment(segment: WallSegment) -> Wall | None:
+        async def create_segment(segment: WallSegment, shift: tuple[float, float, float]) -> Wall | Prim | None:
             end = segment.end.to_msg()
             end.z += segment.height
             try:
-                wall_name = self._realizer.realize(f"wall_{next(self.wall_counter)}")
+                wall_name = self._NS_WALL(self._realizer.realize(f"wall_{next(self.wall_counter)}"))
+                material = material_to_msg(await segment.material.resolve())
+                if (sloped := sloped_box(segment)) is not None:
+                    (sx, sy, sz), pose = sloped
+                    pose_msg = pose.to_msg()
+                    pose_msg.position = _shifted(pose_msg.position, shift)
+                    return Prim(name=wall_name, pose=pose_msg, scale=Scale(x=sx, y=sy, z=sz), mesh_path="", material=material, is_static=True)
                 return Wall(
-                    name=self._NS_WALL(wall_name),
-                    start=segment.start.to_msg(),
-                    end=end,
-                    material=material_to_msg(await segment.material.resolve()),
+                    name=wall_name,
+                    start=_shifted(segment.start.to_msg(), shift),
+                    end=_shifted(end, shift),
+                    material=material,
                     thickness=segment.width,
                 )
 
@@ -575,11 +643,11 @@ class MujocoSimulator(BaseSim, NodeInterface):
             try:
                 prim_name = self._realizer.realize(f"obstacle_{next(self.wall_counter)}")
                 meshes = _mesh_files(model)
-                prim = Prim()
+                prim = Prim(is_static=True)
                 prim.mesh_path = meshes[0][1] if meshes else ""
                 prim.visuals = [PrimVisual(name=name, mesh_path=path) for name, path in meshes[1:]]
                 prim.name = self._NS_WALL(prim_name)
-                prim.pose = obstacle.pose.to_msg()
+                prim.pose = self._placed(obstacle.pose).to_msg()
                 prim.scale = Scale(x=1.0, y=1.0, z=1.0)
                 return prim
 
@@ -589,15 +657,17 @@ class MujocoSimulator(BaseSim, NodeInterface):
 
         async def create_wall(wall: WallDefinition) -> tuple[typing.Iterator[object], typing.Iterator[object]]:
             segments, obstacles = await realize_renderable(wall, _MESH_MODEL_TYPES)
-            return map(create_segment, segments), map(create_obstacle, obstacles)
+            shift = self._shift((wall.start.x + wall.end.x) / 2.0, (wall.start.y + wall.end.y) / 2.0)
+            return (create_segment(segment, shift) for segment in segments), map(create_obstacle, obstacles)
 
         wall_futures = await asyncio.gather(*map(create_wall, walls))
         segment_futures, obstacle_futures = zip(*wall_futures, strict=False) if wall_futures else ((), ())
 
         walls_req = SpawnWalls.Request(env_id=self._env_id)
         prims_req = SpawnPrims.Request(env_id=self._env_id)
-        walls_req.walls = list(filter(None, await asyncio.gather(*itertools.chain.from_iterable(segment_futures))))
-        prims_req.prims = list(filter(None, await asyncio.gather(*itertools.chain.from_iterable(obstacle_futures))))
+        segment_msgs = list(filter(None, await asyncio.gather(*itertools.chain.from_iterable(segment_futures))))
+        walls_req.walls = [msg for msg in segment_msgs if isinstance(msg, Wall)]
+        prims_req.prims = [msg for msg in segment_msgs if isinstance(msg, Prim)] + list(filter(None, await asyncio.gather(*itertools.chain.from_iterable(obstacle_futures))))
 
         walls_res = await self._clients.SpawnWalls.call_timeout(walls_req)
         prims_res = await self._clients.SpawnPrims.call_timeout(prims_req)
@@ -615,7 +685,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
                     name=self._NS_FLOOR(floor.name),
                     x_length=floor.x_length,
                     y_length=floor.y_length,
-                    pos=floor.pos.to_msg(),
+                    pos=self._placed_point(floor.pos.to_msg()),
                     material=material_to_msg(await floor.material.resolve()),
                 )
 
@@ -642,7 +712,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
                     name=self._NS_CEILING(ceiling.name),
                     x_length=ceiling.x_length,
                     y_length=ceiling.y_length,
-                    pos=pos,
+                    pos=self._placed_point(pos),
                     cast_shadows=ceiling.cast_shadows,
                     material=material_to_msg(await ceiling.material.resolve()),
                 )
@@ -661,12 +731,12 @@ class MujocoSimulator(BaseSim, NodeInterface):
 
     def _light_msg(self, light: LightDefinition) -> Light:
         spec = light.spec
-        fixtures = [] if spec.ambient else (light.fixtures if light.rig else [light.position if light.position is not None else light.offset])
+        fixtures = [] if spec.ambient else (light.fixtures if light.rig else [light.position])
         return Light(
             name=light.name,
             shape=spec.shape,
             cone_deg=spec.cone_deg,
-            positions=[position.to_msg() for position in fixtures],
+            positions=[self._placed_point(position.to_msg()) for position in fixtures],
             direction=geometry_msgs.msg.Vector3(x=light.direction[0], y=light.direction[1], z=light.direction[2]),
             flux=light.lux if spec.ambient else light.lumens,
             color=cct_to_rgb(light.cct_K),
@@ -688,7 +758,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
         return res is not None and all(res.ret)
 
     async def _move_light(self, light: LightDefinition, position: Position, yaw: float) -> None:
-        state = LightState(name=light.name, move=True, position=position.to_msg(), yaw=yaw)
+        state = LightState(name=light.name, move=True, position=self._placed_point(position.to_msg()), yaw=yaw)
         res = await self._clients.SetLights.call_timeout(SetLights.Request(env_id=self._env_id, states=[state]))
         if res is None or not all(res.ret):
             raise RuntimeError(f"light {light.name!r} did not move")
@@ -699,34 +769,47 @@ class MujocoSimulator(BaseSim, NodeInterface):
         if res is None or not all(res.ret):
             raise RuntimeError(f"light {light.name!r} did not take its state")
 
-    async def spawn_box(self, name: str, size: tuple[float, float, float], pose: Pose, material: MaterialIdentifier | None = None) -> bool:
-        """Spawn an axis-aligned box as a single primitive Prim (empty mesh, scale = size), in its material when one is given."""
+    async def spawn_box(self, name: str, size: tuple[float, float, float], pose: Pose, material: MaterialIdentifier | None = None, *, velocity: tuple[float, float, float] | None = None, comb: bool = False) -> bool:
+        """Spawn a box as a single primitive Prim (empty mesh, scale = size), in its material when one is given, moving when `velocity` is given."""
         sx, sy, sz = size
         prim = Prim(
             name=name,
-            pose=pose.to_msg(),
+            pose=self._placed(pose).to_msg(),
             scale=Scale(x=sx, y=sy, z=sz),
             mesh_path="",
+            comb=comb,
+            is_static=velocity is None,
         )
+        if velocity is not None:
+            prim.velocity = _vector(velocity)
         if material is not None:
             prim.material = material_to_msg(await material.resolve())
-        req = SpawnPrims.Request(env_id=self._env_id, prims=[prim])
-        res = await self._clients.SpawnPrims.call_timeout(req)
-        return bool(res) and bool(res.ret) and res.ret[0]
+        return await self._prim_batch.submit(prim)
 
     async def move_box(self, name: str, pose: Pose) -> bool:
-        req = EditPrims.Request(env_id=self._env_id, prims=[Prim(name=name, pose=pose.to_msg())], pose=True)
+        req = EditPrims.Request(env_id=self._env_id, prims=[Prim(name=name, pose=self._placed(pose).to_msg())], pose=True)
         self._clients.EditPrims.client.call_async(req)
         return True
+
+    async def move_boxes(self, poses: Mapping[str, Pose]) -> bool:
+        req = EditPrims.Request(env_id=self._env_id, prims=[Prim(name=name, pose=self._placed(pose).to_msg()) for name, pose in poses.items()], pose=True)
+        self._clients.EditPrims.client.call_async(req)
+        return True
+
+    async def set_box_velocities(self, velocities: Mapping[str, tuple[float, float, float]]) -> bool:
+        req = EditPrims.Request(env_id=self._env_id, prims=[Prim(name=name, velocity=_vector(velocity)) for name, velocity in velocities.items()], velocity=True)
+        res = await self._clients.EditPrims.call_timeout(req)
+        return bool(res) and all(res.ret)
 
     async def delete_box(self, name: str) -> bool:
         return await self._delete_entity(name)
 
     async def set_robot_pose(self, sim_path: str, pose: Pose) -> bool:
         prim_name = self._robot_prims.get(sim_path)
-        if prim_name is None:
+        if prim_name is None or not await self._move_entity(prim_name, pose):
             return False
-        return await self._move_entity(prim_name, pose)
+        self._track_level(sim_path, pose)
+        return True
 
     async def step(self, n: int = 1) -> bool:
         """Unused wall-clock fake, superseded by SimLifecycle.step_seconds."""
@@ -739,7 +822,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
                 SpawnPedestrian(
                     pedestrian=Pedestrian(
                         name=pedestrian.sim_path,
-                        pose=pedestrian.pose.to_msg(),
+                        pose=self._placed(pedestrian.pose).to_msg(),
                     ),
                     model_ref=pedestrian.model.name,
                 )
@@ -768,8 +851,40 @@ class MujocoSimulator(BaseSim, NodeInterface):
         return success
 
     async def pedestrian_update(self, pedestrians: Pedestrians) -> Sequence[bool]:
-        self._peds_publisher.publish(pedestrians)
+        self._peds_publisher.publish(self._placed_peds(pedestrians))
         return tuple(True for _ in pedestrians.pedestrians)
+
+    def _placed_peds(self, pedestrians: Pedestrians) -> Pedestrians:
+        """The pedestrians in the simulator frame, the message itself while the levels are not stacked."""
+        if not self._realizer.placement().stacked:
+            return pedestrians
+        placed = copy.deepcopy(pedestrians)
+        for ped in placed.pedestrians:
+            ped.pose = self._placed(Pose.from_msg(ped.pose)).to_msg()
+        return placed
+
+    def _placed_point(self, point: geometry_msgs.msg.Point) -> geometry_msgs.msg.Point:
+        """An abstract point in the simulator frame."""
+        return _shifted(point, self._shift(point.x, point.y))
+
+    def _map_offset_request(self, sim_path: str) -> SetMapOffset.Request | None:
+        """The request that moves a spawned robot's map -> odom to the inverse of its level's shift, None while that is what the server holds."""
+        prim_name = self._robot_prims.get(sim_path)
+        dx, dy, dz = self._robot_shift(sim_path)
+        offset = (-dx, -dy, -dz)
+        if prim_name is None or self._map_offsets.get(sim_path, (0.0, 0.0, 0.0)) == offset:
+            return None
+        self._map_offsets[sim_path] = offset
+        return SetMapOffset.Request(env_id=self._env_id, name=prim_name, translation=_vector(offset))
+
+    def _publish_odom(self, sim_path: str) -> None:
+        if (request := self._map_offset_request(sim_path)) is not None:
+            self._clients.SetMapOffset.client.call_async(request).add_done_callback(lambda done: self._map_offset_done(sim_path, done))
+
+    def _map_offset_done(self, sim_path: str, call: rclpy.task.Future) -> None:
+        if call.cancelled() or call.exception() is not None or (result := call.result()) is None or not result.success:
+            self._map_offsets.pop(sim_path, None)
+            self._logger.warning(f"SetMapOffset failed for {sim_path!r}, its map -> odom is stale")
 
     async def _delete_entity(self, name: str) -> bool:
         return (await self._delete_entities([name]))[0]
@@ -791,7 +906,7 @@ class MujocoSimulator(BaseSim, NodeInterface):
             prims=[
                 Prim(
                     name=name,
-                    pose=pose.to_msg(),
+                    pose=self._placed(pose).to_msg(),
                 )
                 for name, pose in actions
             ],

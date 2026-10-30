@@ -505,3 +505,43 @@ def test_entity_sim_path_set_after_realize(realizer):
     )
     result = realizer.realize(obs)
     assert "box1" in result.sim_path
+
+
+def _stacked(realizer):
+    realizer.reset_level_origins({"0": (0.0, 0.0), "1": (17.0, 0.0)})
+    realizer.reset_placement({"0": (0.0, 0.0, 0.0), "1": (9.2, 0.0, 3.0)}, {"0": (0.0, 0.0, 14.0, 10.0), "1": (0.0, 0.0, 14.0, 10.0)})
+    return realizer
+
+
+def test_placement_without_stack_offsets_keeps_the_abstract_layout(realizer):
+    realizer.reset_level_origins({"0": (0.0, 0.0), "1": (17.0, 0.0)})
+    placement = realizer.placement()
+    assert not placement.stacked
+    assert placement.shift("1") == (0.0, 0.0, 0.0)
+
+
+def test_place_moves_a_realized_level_1_entity_by_its_stack_shift(realizer):
+    from arena_simulation_setup.shared import Ceiling, Stairs, Wall
+    from arena_simulation_setup.utils.geometry import Position
+
+    realizer = _stacked(realizer)
+    wall = realizer.realize(Wall(start=Position(1.0, 1.0, 0.0), end=Position(2.0, 1.0, 0.0), top=2.6, bottom=None), "1")
+    placed = realizer.place(wall, "1")
+    assert (placed.start.x - wall.start.x, placed.start.y - wall.start.y, placed.start.z - wall.start.z) == pytest.approx((-7.8, 0.0, 3.0))
+    assert (placed.top, placed.bottom) == (2.6, None)
+    ceiling = realizer.place(realizer.realize(Ceiling(name="c", pos=Position(3.0, 3.0, 0.0), z=2.5), "1"), "1")
+    assert ceiling.z == pytest.approx(5.5)
+    stair = Stairs(name="up", position=Position(3.7, 2.0, 0.0), top=True, to="down")
+    stair.joined = True
+    realized = realizer.realize(stair, "1")
+    assert realized.joined
+    assert realizer.place(realized, "1").joined
+    assert realizer.place(realized, "1").position.z == pytest.approx(3.0)
+    assert realizer.place(wall, "0") is wall
+
+
+def test_placement_finds_the_level_of_an_abstract_point_with_the_env_offset(realizer):
+    placement = _stacked(realizer).placement()
+    assert placement.env == (1.0, 2.0)
+    assert placement.level_at(1.0 + 17.0 + 3.0, 2.0 + 4.0) == "1"
+    assert placement.level_at(1.0 + 3.0, 2.0 + 4.0) == "0"

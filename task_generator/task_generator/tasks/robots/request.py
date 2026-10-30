@@ -36,6 +36,16 @@ class ElevatorLegPhase(GoToPhase):
     """Door-aligned approach or exit waypoint around an elevator ride."""
 
 
+@attrs.define
+class StairsRidePhase(GoToPhase):
+    """Drive to a pose past the boarding half's trigger line, judged on the robot standing on the `target` partner half after the seam teleport."""
+
+
+@attrs.define
+class StairsLegPhase(GoToPhase):
+    """Axis-aligned approach or exit waypoint around a stair crossing."""
+
+
 __all__ = [
     "TaskKind",
     "TaskPhase",
@@ -43,6 +53,8 @@ __all__ = [
     "LoopPhase",
     "ElevatorRidePhase",
     "ElevatorLegPhase",
+    "StairsRidePhase",
+    "StairsLegPhase",
     "ReachPhase",
     "PlayGesturePhase",
     "TaskRequest",

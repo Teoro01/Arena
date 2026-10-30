@@ -52,7 +52,7 @@ Defined in [`_interface.py`](_interface.py):
 
 ### `MechanismITF`
 
-[`_interface.py:138`](_interface.py#L138): door and elevator orchestration. Provides concrete default implementations driven by an internal sim-time tick loop ([`_mechanism_shim.py`](_mechanism_shim.py)) on top of four box/robot primitives. Any simulator that implements the primitives gets door animation, elevator rides, and ped/robot teleport for free; simulators with native support can override the four top-level methods.
+[`_interface.py:138`](_interface.py#L138): door, elevator and stair orchestration. Provides concrete default implementations driven by an internal sim-time tick loop ([`_mechanism_shim.py`](_mechanism_shim.py)) on top of four box/robot primitives. Any simulator that implements the primitives gets door animation, elevator rides, and ped/robot teleport for free, and simulators with native support can override the four top-level methods.
 
 | Default method | Signature | Purpose |
 | --- | --- | --- |
@@ -60,6 +60,9 @@ Defined in [`_interface.py`](_interface.py):
 | `remove_doors` | `(Sequence[str]) -> bool` | delete door geometry by name |
 | `spawn_elevators` | `(Sequence[Elevator]) -> bool` | spawn cabin walls + synthesized door per elevator |
 | `remove_elevators` | `(Sequence[str]) -> bool` | delete cabin geometry + synthesized door by name |
+| `spawn_stairs` | `(Sequence[Stairs]) -> bool` | spawn the boxes of each stair or escalator half, register its runtime and `stairs`/`escalator` semantics |
+| `remove_stairs` | `(Sequence[str]) -> bool` | delete stair boxes and runtimes by name |
+| `remove_mechanisms` | `() -> bool` | remove every stair, elevator and door (world swap) |
 | `stop_mechanisms` | `() -> None` | cancel the tick loop (call on shutdown) |
 | `attach_human_simulator` | `(HumanSimulator) -> None` | bind the human-sim Protocol that supplies ped positions + ped teleport |
 | `spawn_objects` | `(Sequence[Obstacle]) -> Sequence[bool]` | spawn obstacles, an articulated one as a physics model or its link obstacles (see [Articulated objects](#articulated-objects)) |
@@ -68,8 +71,9 @@ Defined in [`_interface.py`](_interface.py):
 
 | Primitive (override required for default behavior) | Signature |
 | --- | --- |
-| `spawn_box` | `(name, size, pose, material=None) -> bool` |
+| `spawn_box` | `(name, size, pose, material=None, *, velocity=None, comb=False) -> bool` |
 | `move_box` | `(name, pose) -> bool` |
+| `move_boxes` | `(Mapping[str, Pose]) -> bool` (optional, defaults to one `move_box` per entry) |
 | `delete_box` | `(name) -> bool` |
 | `set_robot_pose` | `(sim_path, pose) -> bool` |
 
@@ -93,6 +97,7 @@ The `HumanSimulator` Protocol the shim consumes from the attached human-sim:
 | `pedestrian_discs` | `() -> Iterable[tuple[str, tuple[float, float], float]]` (sync, ground truth: name, xy, radius) |
 | `pedestrian_teleport` | `(Mapping[str, tuple[float, float]]) -> bool` (async) |
 | `elevator_doors_changed` | `(Mapping[str, bool]) -> None` (async, cabin name to door open) |
+| `stairs_changed` | `(Mapping[str, bool]) -> None` (async, escalator half name to running) |
 
 Optional, looked up with `getattr` so human sims without it keep working:
 
@@ -135,6 +140,52 @@ Pedestrians ride like robots: the shim counts a ped inside a cabin footprint as 
 - Failed rides: a refused/raising robot or ped teleport releases the riders at once (source unsealed, the
   destination stops waiting), and the riders left in the source cabin call the car back. A silent failure is
   released after `TELEPORT_GRACE` (10 s sim time) with a warning.
+
+#### Stairs and escalators
+
+A stair half ([`Stairs`](../../../../arena_simulation_setup/src/arena_simulation_setup/shared/world.py)) arrives realized: name prefixed, position in the map frame, `to` naming the partner half on the other level. Its side linings, side walls, seam wall and solid rails come in as ordinary walls through `Level.all_walls`, the open rails and an escalator's skirt brushes through `Level.closed_walls`, each line following the walking surface, so a sloped segment (end higher than start) spawns as boxes pitched along it, stacked in strips (`upright_strips`) thin enough that their ends stand within `WALL_LEAN` (1 cm) of vertical. `spawn_stairs` adds the solid geometry agents walk on, each box in the material of its surface (`Stairs.material_of`).
+
+| Half | Boxes | Velocity |
+| --- | --- | --- |
+| stairs | `<name>/step_<i>`, one per `steps()` box, solid from the floor (or the well bottom) to the tread, with `risers` set a tread plate on `<name>/riser_<i>` | static |
+| escalator | `<name>/base_<i>` from `base()`, slabs just under the treads along the ramp and under the landing | static |
+| escalator | `<name>/plate_<i>` from `plates()`, landing plates flush with the floor over the pit before each mouth, spawned with `comb` | static |
+| escalator | `<name>/tread_<k>` from `treads(0.0)`: step blocks, or planks on a `belt` | `tread_velocity` |
+
+Objects dressing a staircase (`Stairs.static_models()`, a surface `model` per box plus the staircase's `models`) spawn through `obstacle_spawn` as `<name>/model_<part>`, the ones riding treads (`Stairs.tread_models`) move with them through one `obstacle_move` per tick, and `remove_stairs` deletes them through `obstacle_delete`. A simulator that cannot load a model skips it.
+
+Under `world.levels:=stack` both halves of a pair are joined (`Stairs.joined`): the bottom half spawns the whole stair from mouth to mouth (`Stairs.whole_stair()`, one tread loop, a landing at each end), the top half spawns nothing, and the halves stay for membership, semantics and the pedestrian simulation. A box spawned with a velocity, zero included, is a gravity-free body that moves at it and carries what stands on it through contact friction. Isaac's `Wall` and `Prim` and MuJoCo's `Prim` carry this as `is_static` (default true), which the adapters set from `velocity is None`. `tread_velocities` gives each tread the belt speed along the axis and the climb of its top, level over a step escalator's landing, and the shim sends a tread's new velocity when it changes. The treads never touch the base, the floor, the side walls or each other. They pass through the landing plates, which `comb` makes possible: Gazebo gives comb boxes collide bitmask `0x01` and moving boxes `0xfffe`, MuJoCo gives both contype 1 and conaffinity 0, and Isaac needs nothing since PhysX makes no contacts between its kinematic treads and static boxes.
+
+| Simulator | Moving box |
+| --- | --- |
+| Gazebo | non-static 1000 kg model with gravity off and the `VelocityControl` system, `set_box_velocities` publishes `/model/<name>/cmd_vel` in the model frame |
+| Isaac | `Wall.velocity` with `is_static` false: a kinematic rigid body the server advances by `RigidBodyView.set_kinematic_targets` every physics step, `EditPrims` with `velocity` changes it, a pose edit teleports it |
+| MuJoCo | `Prim.velocity` with `is_static` false: a free joint body with `gravcomp = 1` whose qvel the server sets before every step, `EditPrims` with `velocity` changes it |
+| flatsim | an ordinary box that follows `move_boxes`, Box2D boxes carry nothing |
+| dummy | `spawn_stairs` is a no-op |
+
+Isaac spawns every box through `SpawnWalls`, which carries yaw only, and sets the full orientation of a tilted box (escalator base, belt planks) with a follow-up `EditPrims`. The well of a top half sinks to `-rise/2`, so the Gazebo, Isaac and MuJoCo ground planes lie at z = -3 m, under the level floors.
+
+Under `world.levels:=stack` the simulator frame differs from the abstract one the rest of the env uses. `Realizer.placement()` gives the shift of every level, and a simulator with `STACKS_LEVELS` (Gazebo, Isaac, MuJoCo) places each pose it receives by the level whose abstract bounds hold it: walls, floors and ceilings through their spawn pose, boxes, entities, lights and robot teleports directly. It publishes each robot's `map -> odom` itself as the inverse shift of the level the robot stands on, updated on a teleport and on `robot_changed_level`, which the shim calls when a robot walks past the seam of a joined pair (`Stairs.joined`, no teleport there). Pedestrians reach the simulator on `sim_peds`, the placed copy of `arena_peds`, which the Gazebo pedestrian plugin reads. The Isaac and MuJoCo viewports take a robot frame from `map` minus that robot's map offset, and publish `camera_pose` plus the offset of the robot they track.
+
+Each tick the shim then:
+
+- Counts the robots (`robot_discs`) and pedestrians (`pedestrian_discs`) inside each half's footprint.
+- Teleports robots across boarding seams: a robot on a half with a spawned partner (`Stairs.boards` and the `to` half among the spawned stairs) that stands past `Stairs.crossed` goes through `set_robot_pose` to `Stairs.landing(partner, x, y, yaw, travel, partner_travel)`, roll and pitch kept. The landing lies on the partner tread at the spot matching the robot's spot on its own tread, at most `STAIRS_LANDING_BACKOFF` short of the partner's trigger line, heading away from its seam, and z changes by the difference of the two tread tops, so the robot keeps its clearance. Both halves then hold the robot latched until it is seen outside their trigger band, so a stale pose on the source or a robot standing at the landing never sends it back, while a robot that walks back through the partner's seam crosses again. A refused or raising teleport is one incident (`<sim_path>: stair teleport '<from>' -> '<to>' failed: <reason>`) and is retried only after the robot left the trigger band. A half whose partner is not spawned (outside a `level_filter`, or dropped at load) lands nowhere and logs one info line at spawn, an exit-only escalator half never teleports. Pedestrians are teleported by the human simulator, the shim only observes their jump.
+- Runs escalator belts: `travel` advances by `Stairs.belt * dt` (towards the seam on a boarding half, mouth-ward on an exit half or one whose partner was dropped) and every spawned tread is re-posed to `treads(travel)`, where the velocity took it, all treads of all halves in one `move_boxes` call. Every tread stays on the stair: one that runs off the far end comes back at the mouth sunk `Stairs.sink` (1 mm on steps) through the landing plate (`STAIRS_PLATE` thick, flush with the floor, over a pit the floor opens for it), slides out just below the floor and rises into place once clear of the plate. On a whole stair the wrap itself happens under the plates at both ends. A stopped escalator keeps `travel` and gets zero tread velocities through `set_box_velocities`, a restarted one its belt velocity again. Gazebo sends that call as one gz `/world/default/set_pose_vector` request run off the event loop and drops a tick's batch while the previous one is still in flight, Isaac and MuJoCo send one fire-and-forget `EditPrims` with every tread, flatsim skips the treads it never spawned. The stairs_demo world (four escalator halves of nine treads) costs one request and 36 poses per tick, which take about 0.2 ms of tick time to compute, instead of 36 `SetEntityPose` calls per tick (1080 per second at 30 Hz).
+- Reports `running` changes of escalator halves to the human simulator in one `stairs_changed` call, starting from running at spawn and including the restart an episode reset causes.
+
+Semantic kinds `stairs` and `escalator` attach to every spawned half on gazebo, isaac, mujoco and flatsim:
+
+| Field | Kind | Type | Meaning |
+| --- | --- | --- | --- |
+| `occupants` | stairs, escalator | continuous | agents inside the half's footprint, robots by sim path and pedestrians by name |
+| members | stairs, escalator | | those agents, robots first |
+| `just_crossed` | stairs, escalator | predicate | true for the one tick after a robot teleport through this half's seam, or after a pedestrian on this half shows up on its partner |
+| `running` | escalator | discrete, writable | `true` (initial) or `false`, a write sets both halves of the pair, a stopped belt freezes its treads |
+| `direction` | escalator | discrete | `up` when the boarding half of the pair is the bottom one, `down` when it is the top one, on both halves, empty without a boarding half |
+
+An episode reset puts every belt back at rest and running, and clears latches, members and `just_crossed`.
 
 #### Articulated objects
 
@@ -424,7 +475,8 @@ are what Arena sends it.
   mechanism moves every door on every tick.
 - Geometry: wall segments and obstacle footprints are static outlines, sent in
   one call per spawn. Doors are boxes behind the four mechanism primitives,
-  pedestrians are discs fed by `pedestrian_update`.
+  pedestrians are discs fed by `pedestrian_update`. Stairs steps and treads are
+  boxes like any other, so a planar robot cannot climb them.
 - Levels: floors define level slabs. A robot collides and casts rays only
   against the level containing its z. The shipped multi-level worlds lay their
   levels side by side in xy at one z, so an elevator ride there is an xy
@@ -470,9 +522,10 @@ are what Arena sends it.
    `MechanismITF.__init__` to tag semantics with the simulator key.
    `before_reset_episode`/`after_reset_episode`/`step` default to no-ops,
    override only if the simulator needs episode-boundary or stepped-sim work.
-2. Implement the four `MechanismITF` primitives (`spawn_box`, `move_box`,
-   `delete_box`, `set_robot_pose`) to get door + elevator animation out of
-   the box, and call `_register_agent_robot` on spawn / `_forget_agent_robot`
+2. Implement the four `MechanismITF` primitives (`spawn_box` with its
+   `velocity` and `comb` keywords, `move_box`, `delete_box`, `set_robot_pose`)
+   to get door, elevator and stair animation out of the box, override
+   `move_boxes` when the simulator can move many boxes in one request, and call `_register_agent_robot` on spawn / `_forget_agent_robot`
    on remove so the door gate can see the simulator's robots. Override
    `spawn_doors`/`remove_doors`/`spawn_elevators`/`remove_elevators` only if
    the simulator has native door support that supersedes the shim, and call

@@ -104,6 +104,7 @@ class RobotManager(NodeInterface):
     _start_pos: Pose
     _goal_pos: Pose
     _robot_radius: float
+    _climbs: frozenset[str]
     _robot: Robot
     _move_base_pub: rclpy.publisher.Publisher
     _goal_pub: rclpy.publisher.Publisher
@@ -202,6 +203,7 @@ class RobotManager(NodeInterface):
         self._start_pos = Pose()
         self._goal_pos = Pose()
         self._robot_radius = footprint_radius(self._config)
+        self._climbs = frozenset() if self._config.mobile is None else self._config.mobile.climbs
 
         self._robot = robot
         self._robot.sim_path = self._environment_manager.realize(robot.name)
@@ -590,6 +592,7 @@ class RobotManager(NodeInterface):
             world_manager,
             robot_radius=self.radius,
             goal_tolerance=float(self.node.conf.Robot.GOAL_TOLERANCE_RADIUS.value),
+            climbs=self._climbs,
         )
 
         self.node._known_subjects.update(pedestrians)

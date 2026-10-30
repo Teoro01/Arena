@@ -69,6 +69,13 @@ def generate_launch_description():
     )
 
     LaunchArgument(
+        name='world.levels',
+        default_value='auto',
+        choices=['auto', 'stack', 'spread'],
+        description='stack: levels above one another in the simulator, stair and escalator pairs joined at their seams. spread: levels side by side. auto: stack when the world has stairs or escalators and the simulator stacks (gazebo), else spread.',
+    )
+
+    LaunchArgument(
         name='kg.derive',
         default_value='auto',
         choices=['auto', 'all', 'off'],

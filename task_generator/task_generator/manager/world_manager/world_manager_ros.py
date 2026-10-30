@@ -238,8 +238,11 @@ class WorldManagerROS(MapServerHandler, WorldManager):
         world = world_view.load(level_filter=level_filter, derive=self.node.conf.Arena.KG_DERIVE.value or 'auto')
         level_origins = world_view.level_origins()
         origins = level_origins if level_origins is not None else {fid: (0.0, 0.0) for fid in world.level_ids}
+        offsets = self._stack_offsets(world_name, world)
         self.node._realizer.reset_level_origins(origins)
+        self.node._realizer.reset_placement(offsets, world.level_bounds())
         self.node._realizer.reset_elevator_levels(world.elevator_levels())
+        self.node._realizer.reset_stair_levels(world.stair_levels())
         compacted_description = world.compact_world(origins=origins)
 
         multi_level_map = self._load_multi_level_map(world_view, world.level_ids)
@@ -260,6 +263,10 @@ class WorldManagerROS(MapServerHandler, WorldManager):
         else:
             world_map = WorldMap.from_world_description(compacted_description, resolution=_DEFAULT_RESOLUTION, time=self.node.sim_time, _level_origins=level_origins)
         x_min, y_min, x_max, y_max = world_map.bounds
+        for level_id, (bx0, by0, bx1, by1) in world.level_bounds().items():
+            if level_id in offsets:
+                dx, dy, _dz = offsets[level_id]
+                x_min, y_min, x_max, y_max = min(x_min, bx0 + dx), min(y_min, by0 + dy), max(x_max, bx1 + dx), max(y_max, by1 + dy)
         extent = arena_runtime_msgs.msg.WorldExtent(x_min=float(x_min), y_min=float(y_min), x_max=float(x_max), y_max=float(y_max))
 
         req = arena_runtime_msgs.srv.ConfirmWorld.Request()
@@ -314,6 +321,27 @@ class WorldManagerROS(MapServerHandler, WorldManager):
         self.node._publish_semantics_snapshot()
 
         return True
+
+    def _stack_offsets(self, world_name: str, world: World) -> dict[str, tuple[float, float, float]]:
+        """Per level simulator offsets under `world.levels`, empty to spread, every stair and escalator pair marked joined when stacked."""
+        mode = self.node.conf.Arena.WORLD_LEVELS.value or 'auto'
+        simulator = self._environment_manager.simulator_name
+        stacks = self._environment_manager.stacks_levels
+        if mode == 'stack' and world.layout != 'stacked':
+            raise RuntimeError(f'world.levels:=stack: {world_name!r} is a spread world, every level has a floor plan of its own')
+        if mode == 'stack' and not stacks:
+            raise RuntimeError(f'world.levels:=stack: the {simulator} simulator lays levels out side by side only')
+        if mode == 'auto' and world.layout == 'stacked' and not stacks:
+            self._logger.warning(f'world.levels:=auto spreads {world_name!r}: the {simulator} simulator lays levels out side by side only')
+        if len(world.levels) < 2 or not (mode == 'stack' or (mode == 'auto' and world.layout == 'stacked' and stacks)):
+            return {}
+        offsets = world.stack_offsets()
+        stairs = [stair for level in world.levels.values() for stair in level.stairs]
+        names = {stair.name for stair in stairs}
+        for stair in stairs:
+            stair.joined = stair.to in names or any(other.to == stair.name for other in stairs)
+        self._logger.info(f'world.levels stacks {world_name!r}: {offsets}')
+        return offsets
 
     async def _load_png_to_server(self, png_bytes: bytes, map_yaml_text: str) -> None:
         """Shift+LoadMap. Caller guarantees map_server is present."""

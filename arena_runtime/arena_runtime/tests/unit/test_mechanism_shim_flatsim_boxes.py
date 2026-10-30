@@ -177,3 +177,35 @@ def test_remove_mechanisms_clears_doors_and_elevators(on_flatsim):
         assert sim._door_runtime == {} and sim._elevator_runtime == {}
 
     on_flatsim(body)
+
+
+def _stairs():
+    from task_generator.shared import Position
+
+    from arena_simulation_setup.shared import Stairs
+
+    return [
+        Stairs(name="esc_low", kind="escalator", position=Position(10.3, 5.0, 0.0), size=[2.6, 1.0], mouth_side="-x", to="esc_high"),
+        Stairs(name="esc_high", kind="escalator", position=Position(23.7, 5.0, 0.0), size=[2.6, 1.0], mouth_side="+x", top=True),
+    ]
+
+
+def test_stairs_become_boxes_in_the_plane_with_runtimes_and_semantics(on_flatsim):
+    from arena_runtime.sim._mechanism_shim import stair_boxes
+
+    async def body(sim, world):
+        stairs = _stairs()
+        assert await sim.spawn_stairs(stairs)
+        names = {prim.name for stair in stairs for prim in stair_boxes(stair)}
+        assert _ours(world) == names
+        assert set(sim._box_sizes) == names
+        assert set(sim._stair_runtime) == {"esc_low", "esc_high"}
+        assert sim._stair_runtime["esc_low"].partner == "esc_high"
+        assert {snap.entity: snap.kind for snap in sim.semantics_snapshot()} == {"esc_low": "escalator", "esc_high": "escalator"}
+        assert sim._mechanism_loop_task is not None and not sim._mechanism_loop_task.done()
+        assert await sim.remove_mechanisms()
+        assert _ours(world) == set()
+        assert sim._stair_runtime == {} and sim._stair_primitives == {}
+        assert sim.semantics_snapshot() == []
+
+    on_flatsim(body)

@@ -11,6 +11,7 @@ import typing
 from collections.abc import Sequence
 
 from arena_people_msgs.msg import Pedestrians
+from arena_simulation_setup.shared import Stairs
 from task_generator.shared import Door, DynamicObstacle, Elevator, Entity, Floor, Obstacle, Robot, Wall
 
 from arena_runtime.sim import BaseSim, SimLifecycle
@@ -163,4 +164,12 @@ class DummySimulator(BaseSim):
 
     async def remove_elevators(self, names: Sequence[str]) -> bool:
         self._logger.debug(f'removing {len(names)} elevators')
+        return True
+
+    async def spawn_stairs(self, stairs: Sequence[Stairs]) -> bool:
+        await asyncio.gather(*(self.safe_resolve(stair.material) for stair in stairs))
+        return True
+
+    async def remove_stairs(self, names: Sequence[str]) -> bool:
+        self._logger.debug(f'removing {len(names)} stairs')
         return True

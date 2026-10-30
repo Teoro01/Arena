@@ -11,7 +11,7 @@ try:
     import shapely
     import shapely.affinity
     from arena_rclpy_mixins.Time import Time
-    from arena_simulation_setup.shared import Elevator
+    from arena_simulation_setup.shared import Elevator, Stairs
     from arena_simulation_setup.shared.entities import Obstacle
     from arena_simulation_setup.tree.World import Level, World, WorldView, Zone
     from arena_simulation_setup.utils.geometry import Pose
@@ -143,6 +143,7 @@ class TestGetPositionsOnMap:
     def make_wm(grid: np.ndarray, resolution: float = 0.05, seed: int = 0) -> WorldManager:
         wm = WorldManager.__new__(WorldManager)
         wm._map = make_map(grid, resolution=resolution)
+        wm._stair_masks = {}
         episode_rng = EpisodeRng()
         episode_rng.reseed(seed)
         fake_node = SimpleNamespace(conf=SimpleNamespace(General=SimpleNamespace(RNG=episode_rng)))
@@ -233,6 +234,7 @@ class TestRenderedSampling:
         wm._map = WorldMap.from_world_description(level, resolution=0.05, time=Time())
         wm._multi_map = None
         wm._zone_masks = {}
+        wm._stair_masks = {}
         episode_rng = EpisodeRng()
         episode_rng.reseed(seed)
         wm._NodeInterface__node = SimpleNamespace(conf=SimpleNamespace(General=SimpleNamespace(RNG=episode_rng)))
@@ -247,6 +249,29 @@ class TestRenderedSampling:
         for p in out:
             assert 10 <= p.x <= 30, f"x={p.x} outside rendered zone [10,30]"
             assert 5 <= p.y <= 15, f"y={p.y} outside rendered zone [5,15]"
+
+
+class TestStairsExclusion:
+    RES = 0.05
+
+    def make_wm(self, world: World) -> WorldManager:
+        wm = WorldManager.__new__(WorldManager)
+        wm._map = make_map(empty_grid(100, 100), resolution=self.RES)
+        wm._map.level_origins = {}
+        wm._multi_map = None
+        episode_rng = EpisodeRng()
+        episode_rng.reseed(0)
+        wm._NodeInterface__node = SimpleNamespace(conf=SimpleNamespace(General=SimpleNamespace(RNG=episode_rng)))
+        wm.update_world(wm._map, world)
+        return wm
+
+    def test_samples_never_land_on_a_stair_half(self):
+        stair = Stairs(name="stairs_low", position=GeoPosition(2.5, 2.5), size=[4.0, 4.0], mouth_side="-x", to="stairs_high")
+        wm = self.make_wm(World(levels={"0": Level(id="0", stairs=[stair])}))
+        out = wm.get_positions_on_map(n=40, safe_dist=0.05, forbid=False)
+        assert len(out) == 40
+        interior = shapely.Polygon([(corner.x, corner.y) for corner in stair.corners()]).buffer(-self.RES)
+        assert not any(interior.contains(shapely.Point(p.x, p.y)) for p in out)
 
 
 class TestStaticFootprints:
@@ -350,7 +375,7 @@ class TestStaticFootprints:
 
 
 class TestElevatorHops:
-    """elevator_hops rides cabin to cabin over the world's elevator destinations."""
+    """level_hops rides cabin to cabin over the world's elevator destinations."""
 
     @staticmethod
     def make_wm(world: World, level_origins: dict[str, tuple[float, float]]) -> WorldManager:
@@ -375,20 +400,20 @@ class TestElevatorHops:
 
     def test_route_boards_each_shaft_on_its_source_level(self):
         wm = self.make_wm(self.stacked(), {"0": (0.0, 0.0), "1": (20.0, 0.0), "2": (40.0, 0.0)})
-        hops = wm.elevator_hops("0", "2")
+        hops = wm.level_hops("0", "2")
         assert [(h.board_position.x, h.board_position.y) for h in hops] == [(1.0, 1.0), (25.0, 1.0)]
         assert all(wm.elevator_ride(h, 0.3).boarding_radius == pytest.approx(1.0 - 0.05 - 0.025 - 0.3) for h in hops)
 
     def test_route_is_empty_on_the_same_level_or_without_a_shaft(self):
         wm = self.make_wm(self.stacked(), {"0": (0.0, 0.0), "1": (20.0, 0.0), "2": (40.0, 0.0)})
-        assert wm.elevator_hops("1", "1") == []
-        assert wm.elevator_hops("0", "3") == []
+        assert wm.level_hops("1", "1") == []
+        assert wm.level_hops("0", "3") == []
 
     def test_destination_on_an_unloaded_level_is_no_route(self):
         world = self.stacked()
         del world.levels["2"]
         wm = self.make_wm(world, {"0": (0.0, 0.0), "1": (20.0, 0.0)})
-        assert wm.elevator_hops("1", "2") == []
+        assert wm.level_hops("1", "2") == []
 
 
 class TestLevelOfPoint:

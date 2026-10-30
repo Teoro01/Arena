@@ -34,9 +34,10 @@ levels), with start and goal sampled anywhere. Which levels exist is set at load
 
 Crossing floors is handled below the task mode, in `RobotManager.submit_task`:
 [`route_phases`](../../manager/robot_manager/elevator_routing.py) expands the explicit
-`via` elevators of a `GoToPhase`, then, when the goal is on a different level than the
-one the robot ends up on, the BFS route over the elevator graph
-(`WorldManager.elevator_hops`). Each ride becomes a door-aligned approach leg
+`via` entries of a `GoToPhase` (elevator or stair half names), then, when the goal is on a
+different level than the one the robot ends up on, the fewest-hop route over the elevators
+and the stairs the robot climbs (`WorldManager.level_hops`). A tie in hop count goes to the
+route with fewer elevator rides. Each ride becomes a door-aligned approach leg
 (`ElevatorLegPhase`), an `ElevatorRidePhase` and a door-aligned exit leg. The ride is a
 goto phase whose `target` is the boarding cabin, whose dispatch pose sits at the cabin's
 back wall and whose `until` atom is `robot in <destination cabin>`, so it is met once the
@@ -45,6 +46,26 @@ phase. The starting level comes from the `start` pose a task mode passes along w
 request (a reset submits before the robot is moved there), or from the robot's live pose
 when none is given. The mechanism shim teleports the robot across while it waits inside
 the cabin.
+
+A stair is routable only through a boarding half (one with `to`: every stair half, the
+boarding half of an escalator) and only for a robot whose mobile cap lists its kind in
+`climbs` (see the [robots README](../../../../arena_robots/arena_robots/robots/README.md)).
+A robot without it never routes through stairs, and a `via` naming a stair it does not
+climb, or an exit-only escalator half, is an error. A stopped escalator stays routable, the
+robot walks it. Each crossing becomes three phases, all in the abstract frame:
+
+1. a `StairsLegPhase` on the axis outside the boarding mouth, facing the seam, 1 m or the
+   robot radius plus 0.1 m out, met within 0.25 m once facing the seam within 0.3 rad
+2. a `StairsRidePhase` with its dispatch pose past the trigger line (`STAIRS_SEAM_INSET`
+   before the seam) as deep as the robot's disc fits 0.05 m short of the seam wall, at least
+   0.05 m past the line, and a tolerance of half that overshoot, so a planner stopping within
+   it has crossed. Its `target` is the partner half, so it arrives once the runtime has teleported
+   the robot there
+3. a `StairsLegPhase` on the axis outside the partner's mouth, facing out, met only with the
+   robot centre 0.1 m past the mouth
+
+Steps and treads are solid geometry every sensor sees, the robot climbs them under its own
+physics and its planner gets no hint that they are passable.
 
 ## Task modes (`TM_Robots` subclasses)
 

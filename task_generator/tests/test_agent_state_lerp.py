@@ -258,3 +258,11 @@ def test_roster_after_removal_covers_the_engines_last_frame() -> None:
 
 def test_no_roster_before_the_engine_has_published() -> None:
     assert _adapter()._interpolate_agent_states(int(1e9)) is None
+
+
+def test_lerp_snaps_a_jump_its_speed_cannot_explain_and_sweeps_a_fast_walk() -> None:
+    prev = _frame(0, agent_id=[1, 2], x=[0.0, 0.0], y=[0.0, 0.0], theta=[0.0, 0.0], vx=[1.0, 4.0], vy=[0.0, 0.0])
+    curr = _frame(0, int(0.5e9), agent_id=[1, 2], x=[20.0, 2.0], y=[0.0, 0.0], theta=[0.0, 0.0], vx=[1.0, 4.0], vy=[0.0, 0.0])
+    lerped = _adapter(prev, curr)._interpolate_agent_states(int(0.25e9))
+
+    assert list(lerped.x) == pytest.approx([20.0, 1.0])
