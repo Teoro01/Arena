@@ -250,13 +250,13 @@ class Stairs(Named):
         y0 = self.position.y - ay * self.length / 2.0
         return Position(x0 + ax * along - ay * across, y0 + ay * along + ax * across, self.position.z + z)
 
-    def along(self, x: float, y: float) -> float:
+    def along[T: (float, np.ndarray)](self, x: T, y: T) -> T:
         """Distance of a level-frame point from the mouth along the axis."""
         ax, ay = self.axis
         mouth = self.mouth
         return (x - mouth.x) * ax + (y - mouth.y) * ay
 
-    def across(self, x: float, y: float) -> float:
+    def across[T: (float, np.ndarray)](self, x: T, y: T) -> T:
         """Distance of a level-frame point to the left of the axis."""
         ax, ay = self.axis
         mouth = self.mouth

@@ -73,6 +73,7 @@ def separated(mesh: NavMesh, components: np.ndarray, start: Position, goal: Posi
 class MeshNavAdapter(MobileAdapter):
     kind: ClassVar[str] = "meshnav"
     routes_levels: ClassVar[bool] = True
+    bringup: MeshNavBringup
 
     def __init__(self, robot_manager: RobotManager, **kwargs: object):
         super().__init__(robot_manager, **kwargs)
