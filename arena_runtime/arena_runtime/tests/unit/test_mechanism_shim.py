@@ -1098,6 +1098,7 @@ class _Mech:
         self._lights: dict[str, Light] = {}
         self._light_outputs: dict[str, tuple[float, float]] = {}
         self._light_poses: dict[str, tuple[Position, float]] = {}
+        self._articulated: dict = {}
         self._semantics = SemanticsManager(self)
 
     def robot_discs(self) -> list[tuple[str, tuple[float, float], float]]:

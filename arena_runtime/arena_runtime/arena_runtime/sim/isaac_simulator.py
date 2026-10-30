@@ -35,9 +35,13 @@ from arena_simulation_setup.shared import Light as LightDefinition
 from arena_simulation_setup.shared import Obstacle as ObstacleDefinition
 from arena_simulation_setup.shared import cct_to_rgb
 from arena_simulation_setup.tree.Wall import WallSegment
+from arena_simulation_setup.utils.articulation import Values
 from isaacsim_msgs.msg import (
+    ArticulatedLink,
     Ceiling,
     Floor,
+    JointCommand,
+    JointDynamics,
     Light,
     LightState,
     Material,
@@ -47,9 +51,11 @@ from isaacsim_msgs.msg import (
 from isaacsim_msgs.srv import (
     DeleteLights,
     DeletePrims,
+    DriveArticulated,
     EditPrims,
     ResetWorld,
     SetLights,
+    SpawnArticulated,
     SpawnCeilings,
     SpawnFloors,
     SpawnLights,
@@ -76,6 +82,8 @@ from task_generator.utils.flags import ObstaclesOptim, obstacles_optim_level
 from arena_runtime._node import NodeInterface
 from arena_runtime.constants import SimSimulator
 from arena_runtime.sim import BaseSim, SimKwargs, SimLifecycle
+from arena_runtime.sim._articulation import ArticulatedObject, command_fields, link_message
+from arena_runtime.sim._articulation import JointCommand as ArticulatedCommand
 from arena_runtime.sim._control import (
     effective_control_yaml,
     odom_relay_node,
@@ -166,6 +174,7 @@ def material_to_msg(material: arena_simulation_setup.tree.assets.Material.Materi
 
 class IsaacSimulator(BaseSim, NodeInterface):
     SIM_NAME = 'isaac'
+    ARTICULATED_PHYSICS = True
 
     def __init__(self, **kwargs: typing.Unpack[SimKwargs]) -> None:
         """Initialize IsaacSimulator"""
@@ -185,10 +194,12 @@ class IsaacSimulator(BaseSim, NodeInterface):
             DeleteLights=self.node.create_client_wrapper(DeleteLights, "/isaac/DeleteLights"),
             DeletePedestrians=self.node.create_client_wrapper(DeletePedestrians, "/isaac/DeletePedestrians"),
             DeletePrims=self.node.create_client_wrapper(DeletePrims, "/isaac/DeletePrims"),
+            DriveArticulated=self.node.create_client_wrapper(DriveArticulated, "/isaac/DriveArticulated"),
             EditPrims=self.node.create_client_wrapper(EditPrims, "/isaac/EditPrims"),
             MovePedestrians=self.node.create_client_wrapper(MovePedestrians, "/isaac/MovePedestrians"),
             ResetWorld=self.node.create_client_wrapper(ResetWorld, "/isaac/ResetWorld"),
             SetLights=self.node.create_client_wrapper(SetLights, "/isaac/SetLights"),
+            SpawnArticulated=self.node.create_client_wrapper(SpawnArticulated, "/isaac/SpawnArticulated"),
             UpdatePedestrians=self.node.create_client_wrapper(UpdatePedestrians, "/isaac/UpdatePedestrians"),
             SpawnCeilings=self.node.create_client_wrapper(SpawnCeilings, "/isaac/SpawnCeilings"),
             SpawnFloors=self.node.create_client_wrapper(SpawnFloors, "/isaac/SpawnFloors"),
@@ -202,6 +213,7 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
         self._robot_prims: dict[str, str] = {}
         self._shared_lights: set[str] = set()
+        self._box_centers: dict[str, tuple[float, float, float]] = {}
 
     def _robot_loader_args(self, robot: Robot) -> dict[str, object]:
         robot_config = arena_robots.Robot.RobotIdentifier(robot.model.name).resolve_sync()
@@ -413,7 +425,6 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
         results: list[bool] = [False] * len(obstacles)
 
-        # flat cube, bbox offset folded into the spawn pose (statics are delete+respawned, not moved)
         async def spawn_one_box(i: int) -> bool:
             obstacle = obstacles[i]
             size, center = typing.cast(tuple, boxes[i])
@@ -421,7 +432,11 @@ class IsaacSimulator(BaseSim, NodeInterface):
                 s = (obstacle.scale.x, obstacle.scale.y, obstacle.scale.z)
                 size = tuple(d * f for d, f in zip(size, s, strict=True))
                 center = tuple(c * f for c, f in zip(center, s, strict=True))
-            return bool(await self.spawn_box(self._NS_PRIM(obstacle.name), size, offset_pose(obstacle.pose, center)))
+            name = self._NS_PRIM(obstacle.name)
+            ok = bool(await self.spawn_box(name, size, offset_pose(obstacle.pose, center)))
+            if ok:
+                self._box_centers[name] = center
+            return ok
 
         for i, ok in zip(box_indices, await asyncio.gather(*(spawn_one_box(i) for i in box_indices)), strict=True):
             results[i] = bool(ok)
@@ -436,8 +451,38 @@ class IsaacSimulator(BaseSim, NodeInterface):
 
         return tuple(results)
 
+    async def _articulated_spawn(self, objects: Sequence[ArticulatedObject]) -> Sequence[bool]:
+        async def spawn(runtime: ArticulatedObject) -> bool:
+            obstacle = runtime.obstacle
+            links: list[ArticulatedLink] = []
+            for link, joint in runtime.tree():
+                view = runtime.links.get(link)
+                model = await view.model.get([ModelType.USD]) if view is not None else None
+                message = link_message(ArticulatedLink(), runtime, link, joint, JointDynamics)
+                message.usd_path = str(model.path) if model is not None and model.type is ModelType.USD and model.path is not None else ""
+                links.append(message)
+            request = SpawnArticulated.Request(name=self._NS_PRIM(obstacle.name), pose=obstacle.pose.to_msg(), links=links)
+            if obstacle.scale is not None:
+                request.scale.x, request.scale.y, request.scale.z = obstacle.scale.x, obstacle.scale.y, obstacle.scale.z
+            response = await self._clients.SpawnArticulated.call_timeout(request)
+            return response is not None and bool(response.ret)
+
+        return await asyncio.gather(*map(spawn, objects))
+
+    async def _articulated_drive(self, commands: Sequence[ArticulatedCommand]) -> Sequence[Values | None]:
+        request = DriveArticulated.Request(commands=[JointCommand(name=self._NS_PRIM(command.runtime.name), **command_fields(command)) for command in commands])
+        response = await self._clients.DriveArticulated.call_timeout(request)
+        if response is None:
+            return [None] * len(commands)
+        return [dict(zip(reading.joints, reading.position, strict=True)) if reading.found else None for reading in response.readings]
+
+    def _placement(self, obstacle: Obstacle) -> tuple[str, Pose]:
+        name = self._NS_PRIM(obstacle.name)
+        center = self._box_centers.get(name)
+        return name, obstacle.pose if center is None else offset_pose(obstacle.pose, center)
+
     async def obstacle_move(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
-        return await self._move_entities([(self._NS_PRIM(o.name), o.pose) for o in obstacles])
+        return await self._move_entities([self._placement(o) for o in obstacles])
 
     async def pedestrian_move(self, pedestrians: Sequence[DynamicObstacle]) -> Sequence[bool]:
         req = MovePedestrians.Request(
@@ -465,7 +510,10 @@ class IsaacSimulator(BaseSim, NodeInterface):
         return await asyncio.gather(*map(move_robot, robots))
 
     async def obstacle_delete(self, obstacles: Sequence[Obstacle]) -> Sequence[bool]:
-        return await asyncio.gather(*(self._delete_entity(self._NS_PRIM(o.name)) for o in obstacles))
+        names = [self._NS_PRIM(o.name) for o in obstacles]
+        for name in names:
+            self._box_centers.pop(name, None)
+        return await asyncio.gather(*(self._delete_entity(name) for name in names))
 
     async def pedestrian_delete(self, pedestrians: Sequence[DynamicObstacle]) -> Sequence[bool]:
         res = await self._clients.DeletePedestrians.call_timeout(DeletePedestrians.Request(names=[p.sim_path for p in pedestrians]))

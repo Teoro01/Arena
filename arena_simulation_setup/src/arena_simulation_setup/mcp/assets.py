@@ -23,7 +23,8 @@ domain = Domain(
     "assets",
     """Resolvable Arena data of every kind `arena asset` moves (assets_kinds lists them) through the same code the `arena asset` verbs run.
     find and ls show what each resolver answers, pull fetches into the local cache, push publishes to the kind's bucket after the preflight that refuses unresolvable references.
-    import_sources lists the upstream datasets `arena asset import` converts from, import_items one dataset's importable items, and import converts chosen items into the imported root as a job.""",
+    import_sources lists the upstream datasets `arena asset import` converts from, import_items one dataset's importable items, and import converts chosen items into the imported root as a job.
+    articulation shows the links, joints, named states, detents and field families of an articulated object, the values scenario objects take as `joints:`.""",
     check=_ready,
 )
 
@@ -91,6 +92,37 @@ def assets_push(
         reason = (done["stderr"] + done["stdout"]).strip().splitlines()[-30:]
         raise ToolError(f"{kind} {name} was not published:\n" + "\n".join(reason), hint="bundle the missing references under the asset directory, or pass force=true")
     return {"kind": kind, "name": name, "published": done["stdout"].strip().splitlines()[-1:]}
+
+
+@domain.tool(read_only=True, open_world=True)
+def assets_articulation(name: Annotated[str, Field(description="object name as a scenario's objects reference it, [domain/]name")]) -> dict[str, object]:
+    """Links, joints (type, parent, child, limits, speed, role, authored dynamics), link materials, named states, detents, field families (family to member joints) and swept box of an articulated object, or that the object is rigid."""
+    from arena_simulation_setup.tree.assets.Object import ObjectIdentifier
+
+    try:
+        view = ObjectIdentifier.parse(name).resolve_sync()
+    except FileNotFoundError as exc:
+        raise ToolError(f"object {name!r} does not resolve: {exc}", hint="assets_find with kind object shows every resolver's verdict") from exc
+    try:
+        articulation = view.articulation
+    except ValueError as exc:
+        raise ToolError(f"object {name!r} has an invalid articulation: {exc}", hint="its annotation.yaml carries the articulation the build wrote") from exc
+    if articulation is None:
+        return {"object": name, "path": str(view.path), "articulated": False}
+    return {
+        "object": name,
+        "path": str(view.path),
+        "articulated": True,
+        "root": articulation.root,
+        "links": [{"name": link, "nodes": nodes, "bundle": (view.path / "links" / link).is_dir()} for link, nodes in articulation.links.items()],
+        "joints": [{**joint.unstructure(), "speed": joint.speed} for joint in articulation.joints],
+        "materials": {link: material.unstructure() for link, material in articulation.materials.items()},
+        "states": articulation.states,
+        "detents": articulation.detents,
+        "families": {family: list(members) for family, members in articulation.families().items()},
+        "initial": articulation.initial(),
+        "swept": None if articulation.swept is None else [list(side) for side in articulation.swept],
+    }
 
 
 ImportKind = Annotated[str, Field(description="kind an import writes, assets_import_sources lists them with their sources")]

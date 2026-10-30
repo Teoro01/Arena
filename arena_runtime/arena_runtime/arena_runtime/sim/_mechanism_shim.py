@@ -14,6 +14,7 @@ from arena_simulation_setup.shared.world import CABIN_DOOR_INSET as DOOR_INSET
 from arena_simulation_setup.shared.world import CABIN_DOOR_THRESHOLD, CABIN_DOOR_WIDTH, ActivationDistance
 from task_generator.shared import Door, Elevator, Orientation, Pose, Position
 
+from ._articulation import link_light_pose, step_articulated
 from ._interface import _BOX_FLOOR_CLEARANCE
 
 if typing.TYPE_CHECKING:
@@ -765,7 +766,7 @@ def _report_incident(mech: MechanismITF, reason: str) -> None:
 
 
 async def _tick(mech: MechanismITF, dt: float) -> None:
-    """Single tick: update triggers, advance state machines, dispatch move_box and teleports."""
+    """Single tick: update triggers, advance state machines, dispatch move_box, articulated link moves and teleports."""
     robot_discs = list(mech.robot_discs())
     ped_discs: list[Disc] = list(mech._human_simulator.pedestrian_discs()) if mech._human_simulator is not None else []
     discs = robot_discs + ped_discs
@@ -835,6 +836,7 @@ async def _tick(mech: MechanismITF, dt: float) -> None:
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
     _check_door_conflicts(mech)
+    await step_articulated(mech, dt, discs)
 
     if mech._human_simulator is not None:
         door_changes: dict[str, bool] = {}
@@ -901,8 +903,17 @@ def _light_moved(last: tuple[Position, float] | None, position: Position, yaw: f
 
 
 async def _apply_lights(mech: MechanismITF) -> None:
-    """Move frame-anchored lights that moved, then push every light whose output changed since its last push."""
+    """Move frame-anchored and link-riding lights that moved, then push every light whose output changed since its last push."""
     for entity, light in mech._lights.items():
+        if light.link and light.owner in mech._articulated:
+            target = link_light_pose(mech._articulated[light.owner], light)
+            if target is None:
+                continue
+            position, yaw = target
+            if _light_moved(mech._light_poses.get(entity), position, yaw):
+                await mech._move_light(light, position, yaw)
+                mech._light_poses[entity] = (position, yaw)
+            continue
         if not light.frame:
             continue
         pose = mech.frame_pose(light.frame)

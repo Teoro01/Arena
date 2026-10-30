@@ -254,13 +254,15 @@ acoustics pipeline. Full field reference:
 
 ### Semantic annotations
 
-Door and elevator state is intrinsic: every spawned door/elevator publishes
-its full vocabulary with no annotation needed:
+Door, elevator and articulated object state is intrinsic: every spawned
+door, elevator and articulated object publishes its full vocabulary with no
+annotation needed:
 
 | kind | discrete | continuous | predicates | members |
 | --- | --- | --- | --- | --- |
 | door | `state` | `progress` | `open`, `in_transit`, `triggered`, `blocked_close` (a close is refused because an agent is in the slab path) | agents within the activation radius |
 | elevator | `cabin_door`, `target` (writable, see above) | `arriving_eta`, `occupants` (riders committed to a ride), `cabin_door_progress`, `live_occupants` (agents inside now), `capacity` (-1 = unlimited) | `departing`, `in_transit`, `dispatched`, `just_arrived`, `full` | agents inside the cabin now |
+| articulated | `state`, `target` (writable), `setting.<joint>` (see [Articulated objects](#articulated-objects)) | `openness.<joint>`, `pos.<joint>`, `angle.<joint>`, `q.<joint>` | one per state name, `moving`, `blocked` | none |
 
 Agents are named as the runtime tracks them: robots by sim path, pedestrians
 by their ped name. `semantics:` on a `doors:`/`elevators:` entry is only for
@@ -288,6 +290,73 @@ elevators:
 ```
 
 Full field reference: [worlds/README.md](worlds/README.md).
+
+### Articulated objects
+
+An object whose annotation carries `articulation:` (links, joints, named
+states, built by arena_assets) gets an `articulated` semantic entity under
+its env-prefixed name. MuJoCo, Isaac and Gazebo spawn it as one physics
+model: its root fixed in place, each other link a body on a damped joint
+with friction, so robots push its doors and drawers and the fields read the
+joints the simulator measures. flatsim and dummy spawn one static obstacle
+per link and move the links to the joint values. Conditions and timelines name it as authored, a level
+object of world.yaml as much as a scenario object, and a scenario object
+takes the name over from a world object of the same name. Its `joints:` key
+sets the joint values every episode starts from (see the objects keys in
+[worlds/README.md](worlds/README.md)).
+
+| field | role | meaning |
+| --- | --- | --- |
+| `state` | discrete | the first state all of whose joint values the joints hold, empty between states |
+| `target` | discrete, writable | the state the targets match, empty otherwise. Writing a state name sets the targets of the joints that state names, the others keep theirs |
+| `openness.<joint>` | continuous, writable | an opening part (a joint the `closed` and `open` states both name): 0 closed, 1 open, its distance from `closed` over the distance from `closed` to `open`, so a lid swinging either way from a closed rest reads open both ways. Writing a fraction in [0, 1] sets its target, writing bare `openness` sets every opening part |
+| `pos.<joint>` | continuous, writable | any other limited joint (knob, dial, handle, button): 0 at its lower limit, 1 at its upper. Writing a fraction sets its target |
+| `angle.<joint>` | continuous | an unlimited joint (wheel, endless knob): its value wrapped to [0, 2 pi) |
+| `setting.<joint>` | discrete, writable | a joint with named `detents` (in the object's annotation, see [Object articulation](../arena_assets/README.md#object-articulation)): the detent it sits at, empty between them. Writing a detent name moves it there |
+| `q.<joint>` | continuous, writable | every movable joint's raw value (radians or meters). Writing sets its target, clamped to its limits |
+| `<state>` | predicate | the joints hold that state's values |
+| `moving` | predicate | a joint is away from its target, or in a physics simulator moved since the last tick |
+| `blocked` | predicate | a driven joint is held: in a physics simulator something keeps it from following its drive, in flatsim and dummy a moving link would have entered a robot or pedestrian disc |
+
+Every field is named `<family>.<joint>`, so the parts of an object are
+listed by family without knowing its joints, and `assets_articulation` lists
+the families and their members. The family names, `state`, `target`,
+`moving` and `blocked` are reserved: no state, joint or detent takes one.
+Joints move toward their targets at their `velocity` (1 rad/s or 0.25 m/s
+when unset). In a physics simulator a written target switches on a drive
+of bounded effort, which follows a reference ramped at that velocity and
+lets go once the joint is within 0.05 rad or 1 cm, setting it onto the
+target. A joint no drive holds moves only when pushed, and its target
+follows it. Link masses come from the link boxes (150 kg/m3, 0.2 to 20 kg).
+A joint's friction, damping, armature and spring are the ones its asset
+authors (see [Object articulation](../arena_assets/README.md#object-articulation)),
+else its role's (a drawer rubs harder than a bare slide), else its kind's,
+and a default friction holds the joint against its own weight, so a lid or
+flap stays where it is left. A sprung joint swings back to its rest when no
+drive holds it, and a link's material sets the friction and bounce of its
+surfaces. An unknown state or detent name, a fraction outside [0, 1] or a
+non-number joint value is refused as a malformed value, and an episode reset returns every joint to its initial
+value. Loading a scenario under the `scenario` obstacles mode, and the MCP
+`worlds_scenario_validate`, check every `joints:`, every field and family a
+condition names and every timeline `set` against the articulated objects of
+the scenario and its world, and fail naming each one they refuse. A scenario
+timeline opens a fridge at `t=5s`, and a phase or episode condition judges it
+with the entity atom, or by family without naming its doors:
+
+```yaml
+timeline:
+- at: 5.0
+  set:
+  - {entity: fridge, field: target, value: open}
+robots:
+- start: [1.0, 1.0, 0.0]
+  phases:
+  - {goto: kitchen}
+  - {until: "fridge.state == open"}
+  - {until: {each: fridge.openness, ge: 0.9, for: 2}}
+conditions:
+- {op: eventually, p: {field: oven.setting.dial, eq: "off"}, text: "Turn the oven off."}
+```
 
 ### KG
 
@@ -466,9 +535,13 @@ schedules:
 
 An object's `annotation.yaml` can carry `lights:` entries with `name` (default
 `light`), `fixture` (default `bulb`), `pose`, `lumens`, `cct_K`,
-`cone_deg` and `glow`. `arena_assets` writes them when it builds an object whose
+`cone_deg`, `glow` and `link`. `arena_assets` writes them when it builds an object whose
 source model contains lights (hand-written entries win, and the built models
-carry no light themselves). `glow` names the material that glows with the
+carry no light themselves). A light of an articulated object carries `link:`,
+the link of the source node it sits under (the root link otherwise), and
+follows that link as the joints move: its position rides on the link and its
+beam turns by the yaw of the link's turn only, so the beam of a tilting link
+keeps its yaw part. `glow` names the material that glows with the
 light, a lamp shade for instance: Isaac, Gazebo and MuJoCo make it emit the
 light's color scaled by its dim, and it is dark while the light is off. Every
 placement of the object, in a level's `objects:`, a scenario's `objects:` or
@@ -546,11 +619,11 @@ actions against exactly one trigger and needs at least one action:
 | --- | --- |
 | `at: <seconds>` | fire once at episode second `t` |
 | `every: <seconds>` | fire at `offset` (default: one period in), then each period, optional `until` |
-| `when: {entity, field, is}` | fire on the false-to-true edge of a semantic value |
-| `when: "<atom>"` | fire on the false-to-true edge of a condition atom (see [Add a scenario](#4-add-a-scenario)) |
+| `when: <condition>` | fire on the false-to-true edge of a condition, a text one or a structured node as in `until` (see [Add a scenario](#4-add-a-scenario)), `{some: fridge.openness, ge: 0.9, for: 1}` included |
+| `when: {entity, field, is}` | the same as `when: {field: <entity>.<field>, eq: <is>}` |
 
-In a `when` atom the subject `robot` stands for every robot of the env: the
-atom holds while it holds for at least one of them, so
+In a `when` condition the subject `robot` stands for every robot of the env: the
+condition holds while it holds for at least one of them, so
 `not robot within 3 of 2,2` holds while some robot is farther than 3 m from
 `(2, 2)`. A robot's own name (anonymous robots are named after their model,
 e.g. `jackal`) judges only that robot. Without a placed robot such an atom
@@ -682,7 +755,9 @@ in order until the `until` holds, which drops the running phase and continues
 after the loop). Every phase takes `until: "<clause>[ or <clause>...]"`, a
 clause being `<atom>[ and <atom>...][ for <seconds>]` (completes once any clause
 has held, every atom together, for its dwell, after arrival for a goto, so
-`caller plays beckon for 0.5 or robot within 2.5 of caller`), `hold_time` (park
+`caller plays beckon for 0.5 or robot within 2.5 of caller`), or a structured
+node (`until: {some: fridge.openness, ge: 0.9, for: 2}`, see the structured
+conditions of [worlds/README.md](worlds/README.md)), `hold_time` (park
 seconds on a goto), `signal`
 (the robot ends the goto itself by sending that signal, such as `arrived`, and
 is judged against the tolerance at that moment), `conditions:` (clauses judged
@@ -977,7 +1052,9 @@ for level_id, level in world.levels.items():
 ```
 
 This raises `FileNotFoundError` if `world.yaml` is missing and `ValueError`
-naming the YAML path if it is malformed. The JSON Schema of the KG
+naming the YAML path if it is malformed. The MCP `worlds_scenario_validate`
+checks a scenario text against its world, its zone references and the
+articulated objects its `joints:`, conditions and timeline name included. The JSON Schema of the KG
 comes from `arena_simulation_setup.kg.schema_for`.
 
 List all scenarios:

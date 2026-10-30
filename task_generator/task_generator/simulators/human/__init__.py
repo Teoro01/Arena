@@ -686,7 +686,7 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
             if not known.spawned:
                 to_register.append(known)
         if to_move:
-            futures.append(self._simulator.obstacle_move(to_move))
+            futures.append(self._simulator.move_objects(to_move))
 
         to_spawn: list[Obstacle] = []
         for known, obstacle in zip(
@@ -704,7 +704,7 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
             known.layer = layer
 
         if to_spawn:
-            futures.append(self._simulator.obstacle_spawn(to_spawn))
+            futures.append(self._simulator.spawn_objects(to_spawn))
         await asyncio.gather(*futures)
 
     async def spawn_dynamic_obstacles(self, obstacles: typing.Sequence[DynamicObstacle]):
@@ -1105,7 +1105,7 @@ class BaseHumanSimulator(NodeInterface, abc.ABC):
 
         if static:
             futures.append(self._remove_obstacles_impl(static))
-        futures.append(self._simulator.obstacle_delete(static))
+        futures.append(self._simulator.delete_objects(static))
         futures.append(self._simulator.pedestrian_delete(dynamic))
         await asyncio.gather(*futures)
 

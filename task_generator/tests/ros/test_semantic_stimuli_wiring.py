@@ -95,3 +95,19 @@ def test_semantics_change_marks_the_snapshot_dirty() -> None:
     TaskGenerator._on_semantics_changed(node, [_change("env_0/door_a", "door", "state", "state", "open")])
     assert node._semantics_dirty
     assert human.calls == [("door_a", "state", "open")]
+
+
+def test_articulated_joint_values_stay_out_of_the_human_sim() -> None:
+    from task_generator.node import TaskGenerator
+
+    human = _Human()
+    TaskGenerator._forward_semantic_changes(
+        _node(human),
+        [
+            _change("env_0/fridge", "articulated", "state", "q.hinge", "0.4"),
+            _change("env_0/fridge", "articulated", "state", "openness.hinge", "0.2"),
+            _change("env_0/fridge", "articulated", "state", "state", "open"),
+            _change("env_0/fridge", "articulated", "predicate", "moving", "false"),
+        ],
+    )
+    assert human.calls == [("fridge", "state", "open"), ("fridge", "moving", "false")]

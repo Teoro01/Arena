@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from typing import ClassVar
 
 import attrs
+from arena_simulation_setup.utils.articulation import STATE_TOLERANCE
 
 from ._mechanism_shim import _DoorState, _near_door_segment, _reset_door, _reset_elevator
 
@@ -16,6 +17,7 @@ if typing.TYPE_CHECKING:
     from arena_simulation_setup.shared.semantics import SemanticCfg
     from task_generator.shared import Door
 
+    from ._articulation import ArticulatedObject
     from ._interface import MechanismITF
     from ._mechanism_shim import _DoorRuntime, _ElevatorRuntime
 
@@ -157,6 +159,15 @@ class SemanticKind(abc.ABC):
 
     @abc.abstractmethod
     def snapshot(self) -> SemanticEntitySnapshot: ...
+
+    def has_field(self, field: str) -> bool:
+        """Whether field is in this kind's vocabulary, the owner of a write to it."""
+        return field in self.DISCRETE or field in self.CONTINUOUS or field in self.PREDICATES
+
+    @classmethod
+    def is_continuous(cls, field: str) -> bool:
+        """Whether a state field of this kind is continuous."""
+        return field in cls.CONTINUOUS
 
     def set_value(self, field: str, value: str) -> None:
         """Read-only kinds reject every write."""
@@ -1005,6 +1016,72 @@ class OccupancyCapSemantics(SemanticKind):
         return SemanticEntitySnapshot(self._entity, self.KIND, {}, continuous, predicates, inside)
 
 
+@semantic_kind('articulated')
+class ArticulatedSemantics(SemanticKind):
+    SUPPORTED_SIMS = frozenset({'gazebo', 'isaac', 'mujoco', 'flatsim', 'dummy'})
+
+    DISCRETE = ('state', 'target')
+    PREDICATES = ('moving', 'blocked')
+    FAMILY_QUANTA: ClassVar[dict[str, float]] = {'openness': 0.01, 'pos': 0.01, 'angle': 0.01}
+    Q_QUANTA: ClassVar[dict[str, float]] = {'revolute': 0.01, 'continuous': 0.01, 'prismatic': 0.001}
+
+    def __init__(self, entity: str, runtime: ArticulatedObject) -> None:
+        articulation = runtime.articulation
+        continuous, discrete = articulation.fields(articulation.initial())
+        super().__init__(entity, (*self.DISCRETE, *discrete), tuple(continuous), (*articulation.states, *self.PREDICATES))
+        self._runtime = runtime
+        self._writable = articulation.writable_fields()
+
+    @classmethod
+    def attach(cls, mech: MechanismITF, entity: str, cfgs: Sequence[SemanticCfg], *, polygon: Sequence[tuple[float, float]] | None = None) -> SemanticKind:
+        runtime = next((runtime for runtime in mech._articulated.values() if runtime.entity == entity), None)
+        if runtime is None:
+            raise SemanticAttachError(f"no articulated object {entity!r}")
+        return cls(entity, runtime)
+
+    def has_field(self, field: str) -> bool:
+        return field in self._discrete or field in self._continuous or field in self._predicates or field in self._writable
+
+    @classmethod
+    def is_continuous(cls, field: str) -> bool:
+        """Every state field but `state`, `target` and the `setting.` detents is a number."""
+        return field not in cls.DISCRETE and not field.startswith('setting.')
+
+    def quantum(self, field: str) -> float:
+        family, _, name = field.partition('.')
+        if family in self.FAMILY_QUANTA:
+            return self.FAMILY_QUANTA[family]
+        joint = self._runtime.articulation.joint_map.get(name) if family == 'q' else None
+        return self.Q_QUANTA.get(str(joint.type), 1.0) if joint is not None else 1.0
+
+    def reset(self) -> None:
+        self._runtime.reset()
+
+    def set_value(self, field: str, value: str) -> None:
+        """Write `target` (a state name), `openness` or a writable family field, the joints it moves get new targets."""
+        if field not in self._writable:
+            raise ValueError('field not writable')
+        runtime = self._runtime
+        try:
+            runtime.command(runtime.articulation.target_for(field, value, runtime.target))
+        except ValueError:
+            raise ValueError('malformed value') from None
+
+    def snapshot(self) -> SemanticEntitySnapshot:
+        runtime = self._runtime
+        articulation = runtime.articulation
+        continuous, settings = articulation.fields(runtime.current)
+        discrete = {'state': articulation.state_of(runtime.current), 'target': articulation.state_of(runtime.target), **settings}
+        predicates = {state: _at_state(runtime.current, values) for state, values in articulation.states.items()}
+        predicates['moving'] = runtime.moving
+        predicates['blocked'] = runtime.blocked
+        return SemanticEntitySnapshot(self._entity, self.KIND, discrete, continuous, predicates)
+
+
+def _at_state(current: dict[str, float], values: dict[str, float]) -> bool:
+    return all(abs(current.get(joint, 0.0) - value) <= STATE_TOLERANCE for joint, value in values.items())
+
+
 def _diff(prev: SemanticEntitySnapshot | None, snap: SemanticEntitySnapshot, quantum: Callable[[str], float]) -> list[SemanticChange]:
     """Emit one SemanticChange per changed field. Continuous fields use the per-field quantum (F2)."""
     prev_discrete = prev.discrete if prev is not None else {}
@@ -1113,7 +1190,7 @@ class SemanticsManager:
             return False
         target: SemanticKind | None = None
         for instance in instances:
-            if field in instance.DISCRETE or field in instance.CONTINUOUS or field in instance.PREDICATES:
+            if instance.has_field(field):
                 target = instance
                 break
         if target is None:
