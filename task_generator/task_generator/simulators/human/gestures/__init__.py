@@ -15,8 +15,11 @@ from arena_rclpy_mixins.registry import ClassRegistry
 if typing.TYPE_CHECKING:
     from task_generator.simulators.human.animation_manager import AnimationLogger, AnimationManager
 
+    from .look import HeadFollower, LookGesture
+
 BODY_HEIGHT = 1.65
 RETARGET_EPS_M = 0.15
+SETTLED_WEIGHT = 1e-3
 FADE_S = 0.25
 HOLD_MIN_S = 0.6
 TRANSITION_S = 0.4
@@ -199,6 +202,7 @@ class _Slot:
         "breath_origin",
         "channel",
         "clip",
+        "follower",
         "hold",
         "joints",
         "kind",
@@ -222,6 +226,7 @@ class _Slot:
         self.locked = locked
         self.phase = "requested"  # requested | ramp | hold | transition | release
         self.clip: GestureClip | None = None
+        self.follower: HeadFollower | None = None
         self.hold: object = None
         self.joints: set[str] = set()
         self.release_frames: Sequence[dict] = ()
@@ -316,10 +321,16 @@ class GestureLayer:
                 if ag is not None and st is not None and st.phase != "release":
                     self._release(agent_id, ag, st)
                 continue
-            if st is not None and st.phase == "release":
+            if st is not None and st.phase == "release" and st.follower is None:
                 continue
             assert req is not None
             self._serve(agent_id, overlay, st, ch, req)
+
+        ag = self._agents.get(agent_id)
+        if ag is not None:
+            for st in list(ag.slots.values()):
+                if st.follower is not None:
+                    self._follow(agent_id, ag, st, dt)
 
     def _serve(self, agent_id: int, overlay: str, st: _Slot | None, ch: Channel, req: GestureRequest) -> None:
         kind = SLOT_KIND[ch.slot]
@@ -335,6 +346,10 @@ class GestureLayer:
             self._release(agent_id, ag, st, restart=True)
             return
         st.release_pending = False
+        if st.follower is not None:
+            st.local = local
+            st.phase = "hold"
+            return
         if st.phase == "hold" and float(np.linalg.norm(local - st.local)) > RETARGET_EPS_M:
             self._retarget(agent_id, st, local)
 
@@ -368,6 +383,11 @@ class GestureLayer:
         bound = gesture.bind(ch.slot, local, {**ch.opts, "moving": moving})
         st = _Slot(overlay, ch.slot, kind, local, ch.opts, bound, locked=ch.lock)
         ag.slots[overlay] = st
+        if kind == "look":
+            st.follower = self._look().follower(local)
+            st.joints = gesture.joints("", moving)
+            st.phase = "hold"
+            return
         try:
             clip = gesture.start(local, bound)
         except ValueError as e:
@@ -392,6 +412,27 @@ class GestureLayer:
             self._drop(agent_id, ag, st, f"gesture {st.kind!r} for ped {agent_id} failed: {e!r}")
             return
         self._install(agent_id, ag, st, clip)
+
+    def _look(self) -> LookGesture:
+        from .look import LookGesture
+
+        gesture = self._gesture("look")
+        assert isinstance(gesture, LookGesture)
+        return gesture
+
+    def _follow(self, agent_id: int, ag: _Agent, st: _Slot, dt: float) -> None:
+        """Step a look slot's follower and show it as a one-frame overlay."""
+        follower = st.follower
+        assert follower is not None
+        follower.step(dt)
+        if st.phase == "release" and follower.weight < SETTLED_WEIGHT:
+            self._manager.clear_ped_blend(agent_id, slot=st.slot)
+            self._end_slot(agent_id, ag, st)
+            return
+        st.hold = follower.aim = self._look().aim(st.local)
+        follower.engaged = 0.0 if st.phase == "release" else 1.0
+        anim = self._manager.register_transient(f"gesture:{st.kind}:{agent_id}:{st.slot}", [follower.frame()], loop=True, owner=agent_id)
+        self._manager.set_ped_blend(agent_id, anim, blend_joints=st.joints, blend_weight=follower.weight, slot=st.slot, carry_ramps=True)
 
     def _advance_all(self, agent_id: int, ag: _Agent) -> None:
         for st in list(ag.slots.values()):
@@ -488,6 +529,10 @@ class GestureLayer:
         return anim_frames[min(k, n - 1)]["angles"]
 
     def _release(self, agent_id: int, ag: _Agent, st: _Slot, *, restart: bool = False) -> None:
+        if st.follower is not None:
+            st.phase = "release"
+            st.release_pending = False
+            return
         clip = st.clip
         if clip is None:
             self._end_slot(agent_id, ag, st)
